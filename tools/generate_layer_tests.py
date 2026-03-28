@@ -12,6 +12,7 @@ from typing import Tuple
 import torch
 import torch.nn as nn
 from ultralytics.nn.modules import C3k2, SPPF
+from ultralytics.nn.modules.block import C2PSA
 
 
 def save_tensor(f, name: str, tensor: torch.Tensor) -> None:
@@ -58,6 +59,30 @@ def fuse_c3k2_for_c(m: C3k2) -> dict[str, torch.Tensor]:
     for i in range(len(m.m)):
         add_pair(f"m{i}_cv1", f"m.{i}.cv1")
         add_pair(f"m{i}_cv2", f"m.{i}.cv2")
+    return out
+
+
+def fuse_c2psa_for_c(m: C2PSA) -> dict[str, torch.Tensor]:
+    """Fused Conv+BN for C2PSA (cv1, cv2, each PSABlock attn + ffn)."""
+    sd = m.state_dict()
+    out: dict[str, torch.Tensor] = {}
+
+    def add_pair(prefix: str, conv_prefix: str) -> None:
+        cw = sd[f"{conv_prefix}.conv.weight"]
+        bw, bb = sd[f"{conv_prefix}.bn.weight"], sd[f"{conv_prefix}.bn.bias"]
+        rm, rv = sd[f"{conv_prefix}.bn.running_mean"], sd[f"{conv_prefix}.bn.running_var"]
+        fw, fb = fold_bn_into_conv(cw, bw, bb, rm, rv)
+        out[f"{prefix}_weight"] = fw
+        out[f"{prefix}_bias"] = fb
+
+    add_pair("cv1", "cv1")
+    add_pair("cv2", "cv2")
+    for i in range(len(m.m)):
+        add_pair(f"m{i}_qkv", f"m.{i}.attn.qkv")
+        add_pair(f"m{i}_proj", f"m.{i}.attn.proj")
+        add_pair(f"m{i}_pe", f"m.{i}.attn.pe")
+        add_pair(f"m{i}_ffn0", f"m.{i}.ffn.0")
+        add_pair(f"m{i}_ffn1", f"m.{i}.ffn.1")
     return out
 
 
@@ -129,6 +154,37 @@ def generate_c3k2_tests(path: str) -> None:
     write_c3k2_fixture(os.path.join(path, "c3k2_yaml.bin"), "yaml", m_yaml, x_yaml, y_yaml)
 
 
+def generate_c2psa_test(path: str) -> None:
+    """C2PSA(128,128,n=2,e=0.5); requires self.c//64>=1 (here c_hidden=64)."""
+    print("Generating C2PSA test...")
+    torch.manual_seed(46)
+    m = C2PSA(128, 128, 2, 0.5)
+    m.eval()
+    x = torch.randn(1, 128, 8, 8)
+    with torch.no_grad():
+        y = m(x)
+    fused = fuse_c2psa_for_c(m)
+    n = len(m.m)
+    with open(os.path.join(path, "c2psa_test.bin"), "wb") as f:
+        save_tensor(f, "c2psa_input", x)
+        save_tensor(f, "c2psa_output", y)
+        save_tensor(f, "c2psa_cv1_weight", fused["cv1_weight"])
+        save_tensor(f, "c2psa_cv1_bias", fused["cv1_bias"])
+        save_tensor(f, "c2psa_cv2_weight", fused["cv2_weight"])
+        save_tensor(f, "c2psa_cv2_bias", fused["cv2_bias"])
+        for i in range(n):
+            save_tensor(f, f"c2psa_m{i}_qkv_weight", fused[f"m{i}_qkv_weight"])
+            save_tensor(f, f"c2psa_m{i}_qkv_bias", fused[f"m{i}_qkv_bias"])
+            save_tensor(f, f"c2psa_m{i}_proj_weight", fused[f"m{i}_proj_weight"])
+            save_tensor(f, f"c2psa_m{i}_proj_bias", fused[f"m{i}_proj_bias"])
+            save_tensor(f, f"c2psa_m{i}_pe_weight", fused[f"m{i}_pe_weight"])
+            save_tensor(f, f"c2psa_m{i}_pe_bias", fused[f"m{i}_pe_bias"])
+            save_tensor(f, f"c2psa_m{i}_ffn0_weight", fused[f"m{i}_ffn0_weight"])
+            save_tensor(f, f"c2psa_m{i}_ffn0_bias", fused[f"m{i}_ffn0_bias"])
+            save_tensor(f, f"c2psa_m{i}_ffn1_weight", fused[f"m{i}_ffn1_weight"])
+            save_tensor(f, f"c2psa_m{i}_ffn1_bias", fused[f"m{i}_ffn1_bias"])
+
+
 def generate_sppf_test(path: str) -> None:
     """SPPF(128,128,k=5,n=3); optional YAML-style with shortcut (matches yolo26 SPPF tail)."""
     print("Generating SPPF test...")
@@ -169,5 +225,6 @@ if __name__ == "__main__":
     os.makedirs(test_path, exist_ok=True)
     generate_conv_test(test_path)
     generate_c3k2_tests(test_path)
+    generate_c2psa_test(test_path)
     generate_sppf_test(test_path)
     print("Test data generated in", test_path)

@@ -14,7 +14,7 @@ Build a standalone, zero-dependency C framework for YOLO26 inference on x86_64 C
 | **Weight Loader** | ✅ DONE | Binary `.bin` loader with named tensor lookup. |
 | **BN Folding** | ✅ DONE | BatchNorm fusion into Conv weights during load time. |
 | **Basic Layers** | ✅ DONE | Conv2D, SiLU, MaxPool, Upsample, Concat. |
-| **Complex Modules** | 🔄 WIP | `C3k2` and `SPPF` implemented; `C2PSA` pending. |
+| **Complex Modules** | 🔄 WIP | `C3k2`, `SPPF`, and `C2PSA` implemented in `src/layers.c`; wire into `model_forward` pending. |
 | **Camera Shim** | ✅ DONE | AVFoundation (macOS) wrapper for real-time RGB frames. |
 | **Detection Head** | ✅ DONE | NMS-free box decoding logic. |
 | **Weight Converter** | ✅ DONE | Python script to export `.pt` to custom `.bin`. |
@@ -28,6 +28,7 @@ Build a standalone, zero-dependency C framework for YOLO26 inference on x86_64 C
 | SIMD flags (x86_64) | Observed in `Makefile` (`-mavx2 -mfma`); ARM uses `-mcpu=apple-m1`. |
 | C3k2 vs PyTorch | See [plan_c3k2.md](plan_c3k2.md): `make verify` runs `tests/test_core` C3k2 parity on `tests/data/c3k2_*.bin`; regenerate with `python tools/generate_layer_tests.py` (needs Ultralytics, e.g. `conda activate py39`). |
 | SPPF vs PyTorch | `sppf_forward` in `src/layers.c` (cv1 linear, chained pools, optional shortcut); parity in `tests/test_core` on `tests/data/sppf_test.bin` and `sppf_shortcut.bin` (regenerate with `python tools/generate_layer_tests.py`). |
+| C2PSA vs PyTorch | See [plan_c2psa.md](plan_c2psa.md): `c2psa_forward` in `src/layers.c`; parity on `tests/data/c2psa_test.bin` from `generate_layer_tests.py`. |
 | Camera shim | Build includes `src/camera_darwin.m`; runtime needs macOS + camera. Smoke: build `yolo26_bench` and run (expects `weights/yolo26.bin`). |
 | `.pt` → `.bin` export | Requires PyTorch + checkpoint: `python3 tools/converter.py --model <path.pt> --output weights/yolo26.bin`. |
 

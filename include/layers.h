@@ -53,4 +53,11 @@ status_t c3k2_forward(tensor_t* output, const tensor_t* input,
                      const tensor_t* b_weights,
                      tensor_t* buffers);
 
+/* C2PSA: e=expansion for hidden c; self.c=int(c1*e); attn_ratio for Attention (default 0.5).
+ * psa_weights: n_blocks * 10 tensors per block: qkv_w,b, proj_w,b, pe_w,b, ffn0_w,b, ffn1_w,b.
+ * buffers[0]: cv1 out [2*c_h, H,W]; buffers[1]: PSABlock out [c_h,H,W]; buffers[2]: concat [2*c_h,H,W]. */
+status_t c2psa_forward(tensor_t* output, const tensor_t* input, int n_blocks, float e, float attn_ratio,
+                       const tensor_t* cv1_w, const tensor_t* cv1_b, const tensor_t* cv2_w, const tensor_t* cv2_b,
+                       const tensor_t* psa_weights, tensor_t* buffers);
+
 #endif

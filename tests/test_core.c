@@ -331,6 +331,105 @@ static void test_sppf_fixture(const char* bin_filename, int kernel_size, int n_p
     free_tensor_map(map, nmap);
 }
 
+static void test_c2psa_fixture(void) {
+    named_tensor_entry_t map[C3K2_MAP_MAX];
+    FILE* fp = open_test_data_bin("c2psa_test.bin");
+    if (!fp) {
+        fprintf(stderr, "SKIP: open tests/data/c2psa_test.bin\n");
+        return;
+    }
+    int nmap = load_tensor_map_fp(fp, map, C3K2_MAP_MAX);
+    if (nmap <= 0) {
+        fprintf(stderr, "SKIP: empty c2psa_test.bin\n");
+        free_tensor_map(map, nmap > 0 ? nmap : 0);
+        return;
+    }
+
+    const int n_blocks = 2;
+    const float e = 0.5f;
+    const float attn_ratio = 0.5f;
+
+    tensor_t* input = map_find(map, nmap, "c2psa_input");
+    tensor_t* expect = map_find(map, nmap, "c2psa_output");
+    tensor_t* cv1_w = map_find(map, nmap, "c2psa_cv1_weight");
+    tensor_t* cv1_b = map_find(map, nmap, "c2psa_cv1_bias");
+    tensor_t* cv2_w = map_find(map, nmap, "c2psa_cv2_weight");
+    tensor_t* cv2_b = map_find(map, nmap, "c2psa_cv2_bias");
+    if (!input || !expect || !cv1_w || !cv1_b || !cv2_w || !cv2_b) {
+        fprintf(stderr, "SKIP: missing C2PSA tensors\n");
+        free_tensor_map(map, nmap);
+        return;
+    }
+
+    tensor_t psa_stack[32];
+    char name[192];
+    for (int bi = 0; bi < n_blocks; bi++) {
+        snprintf(name, sizeof(name), "c2psa_m%d_qkv_weight", bi);
+        tensor_t* p = map_find(map, nmap, name);
+        CHECK(p != NULL, "c2psa qkv_weight");
+        psa_stack[bi * 10 + 0] = *p;
+        snprintf(name, sizeof(name), "c2psa_m%d_qkv_bias", bi);
+        p = map_find(map, nmap, name);
+        CHECK(p != NULL, "c2psa qkv_bias");
+        psa_stack[bi * 10 + 1] = *p;
+        snprintf(name, sizeof(name), "c2psa_m%d_proj_weight", bi);
+        p = map_find(map, nmap, name);
+        CHECK(p != NULL, "c2psa proj_weight");
+        psa_stack[bi * 10 + 2] = *p;
+        snprintf(name, sizeof(name), "c2psa_m%d_proj_bias", bi);
+        p = map_find(map, nmap, name);
+        CHECK(p != NULL, "c2psa proj_bias");
+        psa_stack[bi * 10 + 3] = *p;
+        snprintf(name, sizeof(name), "c2psa_m%d_pe_weight", bi);
+        p = map_find(map, nmap, name);
+        CHECK(p != NULL, "c2psa pe_weight");
+        psa_stack[bi * 10 + 4] = *p;
+        snprintf(name, sizeof(name), "c2psa_m%d_pe_bias", bi);
+        p = map_find(map, nmap, name);
+        CHECK(p != NULL, "c2psa pe_bias");
+        psa_stack[bi * 10 + 5] = *p;
+        snprintf(name, sizeof(name), "c2psa_m%d_ffn0_weight", bi);
+        p = map_find(map, nmap, name);
+        CHECK(p != NULL, "c2psa ffn0_weight");
+        psa_stack[bi * 10 + 6] = *p;
+        snprintf(name, sizeof(name), "c2psa_m%d_ffn0_bias", bi);
+        p = map_find(map, nmap, name);
+        CHECK(p != NULL, "c2psa ffn0_bias");
+        psa_stack[bi * 10 + 7] = *p;
+        snprintf(name, sizeof(name), "c2psa_m%d_ffn1_weight", bi);
+        p = map_find(map, nmap, name);
+        CHECK(p != NULL, "c2psa ffn1_weight");
+        psa_stack[bi * 10 + 8] = *p;
+        snprintf(name, sizeof(name), "c2psa_m%d_ffn1_bias", bi);
+        p = map_find(map, nmap, name);
+        CHECK(p != NULL, "c2psa ffn1_bias");
+        psa_stack[bi * 10 + 9] = *p;
+    }
+
+    int c1 = input->dims[1];
+    int c_hidden = (int)((float)c1 * e);
+    int h = input->dims[2], w = input->dims[3];
+
+    tensor_t buffers[3];
+    tensor_allocate(&buffers[0], 1, 2 * c_hidden, h, w);
+    tensor_allocate(&buffers[1], 1, c_hidden, h, w);
+    tensor_allocate(&buffers[2], 1, 2 * c_hidden, h, w);
+
+    tensor_t output;
+    tensor_allocate(&output, 1, c1, h, w);
+
+    status_t st = c2psa_forward(&output, input, n_blocks, e, attn_ratio, cv1_w, cv1_b, cv2_w, cv2_b, psa_stack,
+                                buffers);
+    CHECK(st == SUCCESS, "c2psa_forward status");
+
+    float md = max_abs_diff_tensor(&output, expect);
+    CHECK(md < 5e-4f, "c2psa max abs diff vs PyTorch golden");
+
+    tensor_free(&output);
+    for (int i = 0; i < 3; i++) tensor_free(&buffers[i]);
+    free_tensor_map(map, nmap);
+}
+
 static void test_decode_detections(void) {
     tensor_t head;
     tensor_allocate(&head, 1, 2, 85, 1);
@@ -363,6 +462,7 @@ int main(void) {
     test_c3k2_fixture("c3k2_yaml.bin", "yaml", 2, false);
     test_sppf_fixture("sppf_test.bin", 5, 3, false);
     test_sppf_fixture("sppf_shortcut.bin", 5, 3, true);
+    test_c2psa_fixture();
     test_decode_detections();
 
     if (failures == 0) {

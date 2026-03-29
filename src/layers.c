@@ -13,6 +13,8 @@ status_t silu_forward(tensor_t* tensor) {
     float* data = tensor->data;
     for (int i = 0; i < count; i++) {
         float x = data[i];
+        // RELU activation function
+        // data[i] = fmaxf(0.0f, x);
         data[i] = x / (1.0f + expf(-x));
     }
     return SUCCESS;

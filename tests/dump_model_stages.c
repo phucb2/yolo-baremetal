@@ -163,7 +163,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    status_t st = model_forward_ex(&model, &input_tensor, &head_output, out);
+    status_t st = model_forward_ex(&model, &input_tensor, &head_output, out, NULL);
     fclose(out);
 
     tensor_free(&input_tensor);

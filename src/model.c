@@ -677,140 +677,227 @@ static status_t dump_stage(FILE* f, const char* name, const tensor_t* t) {
     return save_named_tensor(f, name, t);
 }
 
-status_t model_forward(model_t* model, const tensor_t* input, tensor_t* output) {
-    return model_forward_ex(model, input, output, NULL);
+static const char* const k_model_profile_names[MODEL_FORWARD_PROFILE_STEPS] = {
+    "conv model.0 /2 + SiLU",
+    "conv model.1 /2 + SiLU",
+    "C3k2 model.2 (n=1)",
+    "conv model.3 /2 + SiLU",
+    "C3k2 model.4 (n=1)",
+    "conv model.5 /2 + SiLU",
+    "C3k2 inner model.6",
+    "conv model.7 /2 + SiLU",
+    "C3k2 inner model.8",
+    "SPPF model.9",
+    "C2PSA model.10",
+    "upsample 2x → buf11",
+    "concat(buf11, buf6) → buf12",
+    "C3k2 inner model.13",
+    "upsample 2x → buf14",
+    "concat(buf14, buf4) → buf15",
+    "C3k2 inner model.16 (P3)",
+    "conv model.17 /2 + SiLU",
+    "concat(buf17, buf13) → buf18",
+    "C3k2 inner model.19 (P4)",
+    "conv model.20 /2 + SiLU",
+    "concat(buf20, buf10) → buf21",
+    "C3k2 attn head model.22 (P5)",
+    "Detect one2one → buf23",
+    "tensor_copy buf23 → output",
+};
+
+void model_forward_profile_reset(model_forward_profile_t* p) {
+    if (!p) return;
+    memset(p->ms_sum, 0, sizeof(p->ms_sum));
+    memset(p->ms_last, 0, sizeof(p->ms_last));
+    p->runs = 0;
 }
 
-status_t model_forward_ex(model_t* model, const tensor_t* input, tensor_t* output, FILE* stage_dump) {
+const char* model_forward_profile_step_name(int step_index) {
+    if (step_index < 0 || step_index >= MODEL_FORWARD_PROFILE_STEPS) return "?";
+    return k_model_profile_names[step_index];
+}
+
+void model_forward_profile_print_last(const model_forward_profile_t* p, FILE* fp, const char* title) {
+    if (!p || !fp || p->runs == 0) return;
+    fprintf(fp, "%s\n", title);
+    fprintf(fp, "%-4s %-44s %12s %8s\n", "#", "step", "ms", "% fwd");
+    double tot = 0;
+    for (int i = 0; i < MODEL_FORWARD_PROFILE_STEPS; i++) tot += p->ms_last[i];
+    for (int i = 0; i < MODEL_FORWARD_PROFILE_STEPS; i++) {
+        double pct = tot > 0 ? 100.0 * p->ms_last[i] / tot : 0;
+        fprintf(fp, "%2d   %-44s %12.4f %7.2f%%\n", i + 1, model_forward_profile_step_name(i), p->ms_last[i],
+                pct);
+    }
+    fprintf(fp, "%-4s %-44s %12.4f\n", "", "total (timed steps)", tot);
+}
+
+void model_forward_profile_print_aggregate(const model_forward_profile_t* p, FILE* fp) {
+    if (!p || !fp || p->runs == 0) {
+        fprintf(fp, "No model_forward profile (no successful runs).\n");
+        return;
+    }
+    fprintf(fp, "\n=== model_forward per-step (avg over %u run(s)) ===\n", p->runs);
+    fprintf(fp, "%-4s %-44s %12s %8s\n", "#", "step", "avg ms", "% fwd");
+    double avg[MODEL_FORWARD_PROFILE_STEPS];
+    double avg_tot = 0;
+    for (int i = 0; i < MODEL_FORWARD_PROFILE_STEPS; i++) {
+        avg[i] = p->ms_sum[i] / (double)p->runs;
+        avg_tot += avg[i];
+    }
+    int hot_i = 0;
+    for (int i = 1; i < MODEL_FORWARD_PROFILE_STEPS; i++) {
+        if (avg[i] > avg[hot_i]) hot_i = i;
+    }
+    for (int i = 0; i < MODEL_FORWARD_PROFILE_STEPS; i++) {
+        double pct = avg_tot > 0 ? 100.0 * avg[i] / avg_tot : 0;
+        fprintf(fp, "%2d   %-44s %12.4f %7.2f%%\n", i + 1, model_forward_profile_step_name(i), avg[i], pct);
+    }
+    fprintf(fp, "%-4s %-44s %12.4f\n", "", "total (sum of steps)", avg_tot);
+    fprintf(fp, "\nHot step inside model_forward: #%d %s (~%.1f%% of forward).\n", hot_i + 1,
+            model_forward_profile_step_name(hot_i), avg_tot > 0 ? 100.0 * avg[hot_i] / avg_tot : 0.0);
+}
+
+status_t model_forward(model_t* model, const tensor_t* input, tensor_t* output) {
+    return model_forward_ex(model, input, output, NULL, NULL);
+}
+
+status_t model_forward_ex(model_t* model, const tensor_t* input, tensor_t* output, FILE* stage_dump,
+                          model_forward_profile_t* profile) {
     if (!model || !input || !output) return ERROR_NULL_POINTER;
 
+    double lap[MODEL_FORWARD_PROFILE_STEPS] = {0};
+    timer_t tp;
     conv_params_t s2 = {2, 1, 1};
     status_t st;
+
+#define MF_LAP(I, CODE) \
+    do { \
+        timer_start(&tp); \
+        st = (CODE); \
+        timer_stop(&tp); \
+        lap[(I)] = timer_elapsed_ms(&tp); \
+        if (st != SUCCESS) return st; \
+    } while (0)
 
     st = dump_stage(stage_dump, "stage_00_input", input);
     if (st != SUCCESS) return st;
 
-    st = conv_blk(model, "model.0.conv.weight", "model.0.conv.bias", input, &model->buffers[0], s2, true);
-    if (st != SUCCESS) return st;
+    MF_LAP(0, conv_blk(model, "model.0.conv.weight", "model.0.conv.bias", input, &model->buffers[0], s2, true));
     st = dump_stage(stage_dump, "stage_01_buf0", &model->buffers[0]);
     if (st != SUCCESS) return st;
 
-    st = conv_blk(model, "model.1.conv.weight", "model.1.conv.bias", &model->buffers[0], &model->buffers[1], s2, true);
-    if (st != SUCCESS) return st;
+    MF_LAP(1, conv_blk(model, "model.1.conv.weight", "model.1.conv.bias", &model->buffers[0], &model->buffers[1], s2,
+                       true));
     st = dump_stage(stage_dump, "stage_02_buf1", &model->buffers[1]);
     if (st != SUCCESS) return st;
 
-    /* Export: one Bottleneck (m.0) for early C3k2 blocks. */
-    st = run_c3k2(model, 2, &model->buffers[1], &model->buffers[2], 1, true);
-    if (st != SUCCESS) return st;
+    MF_LAP(2, run_c3k2(model, 2, &model->buffers[1], &model->buffers[2], 1, true));
     st = dump_stage(stage_dump, "stage_03_buf2", &model->buffers[2]);
     if (st != SUCCESS) return st;
 
-    st = conv_blk(model, "model.3.conv.weight", "model.3.conv.bias", &model->buffers[2], &model->buffers[3], s2, true);
-    if (st != SUCCESS) return st;
+    MF_LAP(3, conv_blk(model, "model.3.conv.weight", "model.3.conv.bias", &model->buffers[2], &model->buffers[3], s2,
+                       true));
     st = dump_stage(stage_dump, "stage_04_buf3", &model->buffers[3]);
     if (st != SUCCESS) return st;
 
-    st = run_c3k2(model, 4, &model->buffers[3], &model->buffers[4], 1, true);
-    if (st != SUCCESS) return st;
+    MF_LAP(4, run_c3k2(model, 4, &model->buffers[3], &model->buffers[4], 1, true));
     st = dump_stage(stage_dump, "stage_05_buf4", &model->buffers[4]);
     if (st != SUCCESS) return st;
 
-    st = conv_blk(model, "model.5.conv.weight", "model.5.conv.bias", &model->buffers[4], &model->buffers[5], s2, true);
-    if (st != SUCCESS) return st;
+    MF_LAP(5, conv_blk(model, "model.5.conv.weight", "model.5.conv.bias", &model->buffers[4], &model->buffers[5], s2,
+                       true));
     st = dump_stage(stage_dump, "stage_06_buf5", &model->buffers[5]);
     if (st != SUCCESS) return st;
 
-    /* Inner C3k (C3) at m.0 for wider blocks. */
-    st = forward_c3k2_c3_inner(model, 6, &model->buffers[5], &model->buffers[6], true);
-    if (st != SUCCESS) return st;
+    MF_LAP(6, forward_c3k2_c3_inner(model, 6, &model->buffers[5], &model->buffers[6], true));
     st = dump_stage(stage_dump, "stage_07_buf6", &model->buffers[6]);
     if (st != SUCCESS) return st;
 
-    st = conv_blk(model, "model.7.conv.weight", "model.7.conv.bias", &model->buffers[6], &model->buffers[7], s2, true);
-    if (st != SUCCESS) return st;
+    MF_LAP(7, conv_blk(model, "model.7.conv.weight", "model.7.conv.bias", &model->buffers[6], &model->buffers[7], s2,
+                       true));
     st = dump_stage(stage_dump, "stage_08_buf7", &model->buffers[7]);
     if (st != SUCCESS) return st;
 
-    st = forward_c3k2_c3_inner(model, 8, &model->buffers[7], &model->buffers[8], true);
-    if (st != SUCCESS) return st;
+    MF_LAP(8, forward_c3k2_c3_inner(model, 8, &model->buffers[7], &model->buffers[8], true));
     st = dump_stage(stage_dump, "stage_09_buf8", &model->buffers[8]);
     if (st != SUCCESS) return st;
 
-    st = run_sppf(model, 9, &model->buffers[8], &model->buffers[9], 5, 3, true);
-    if (st != SUCCESS) return st;
+    MF_LAP(9, run_sppf(model, 9, &model->buffers[8], &model->buffers[9], 5, 3, true));
     st = dump_stage(stage_dump, "stage_10_buf9", &model->buffers[9]);
     if (st != SUCCESS) return st;
 
-    /* Checkpoint has one PSABlock under model.10.m.0 (no m.1); YAML repeat may differ from export. */
-    st = run_c2psa(model, 10, &model->buffers[9], &model->buffers[10], 1, 0.5f, 0.5f);
-    if (st != SUCCESS) return st;
+    MF_LAP(10, run_c2psa(model, 10, &model->buffers[9], &model->buffers[10], 1, 0.5f, 0.5f));
     st = dump_stage(stage_dump, "stage_11_buf10", &model->buffers[10]);
     if (st != SUCCESS) return st;
 
-    upsample_nearest_forward(&model->buffers[11], &model->buffers[10], 2);
+    MF_LAP(11, upsample_nearest_forward(&model->buffers[11], &model->buffers[10], 2));
     st = dump_stage(stage_dump, "stage_12_buf11", &model->buffers[11]);
     if (st != SUCCESS) return st;
 
-    concat_forward(&model->buffers[12], &model->buffers[11], &model->buffers[6], 1);
+    MF_LAP(12, concat_forward(&model->buffers[12], &model->buffers[11], &model->buffers[6], 1));
     st = dump_stage(stage_dump, "stage_13_buf12", &model->buffers[12]);
     if (st != SUCCESS) return st;
 
-    st = forward_c3k2_c3_inner(model, 13, &model->buffers[12], &model->buffers[13], true);
-    if (st != SUCCESS) return st;
+    MF_LAP(13, forward_c3k2_c3_inner(model, 13, &model->buffers[12], &model->buffers[13], true));
     st = dump_stage(stage_dump, "stage_14_buf13", &model->buffers[13]);
     if (st != SUCCESS) return st;
 
-    upsample_nearest_forward(&model->buffers[14], &model->buffers[13], 2);
+    MF_LAP(14, upsample_nearest_forward(&model->buffers[14], &model->buffers[13], 2));
     st = dump_stage(stage_dump, "stage_15_buf14", &model->buffers[14]);
     if (st != SUCCESS) return st;
 
-    concat_forward(&model->buffers[15], &model->buffers[14], &model->buffers[4], 1);
+    MF_LAP(15, concat_forward(&model->buffers[15], &model->buffers[14], &model->buffers[4], 1));
     st = dump_stage(stage_dump, "stage_16_buf15", &model->buffers[15]);
     if (st != SUCCESS) return st;
 
-    st = forward_c3k2_c3_inner(model, 16, &model->buffers[15], &model->buffers[16], true);
-    if (st != SUCCESS) return st;
+    MF_LAP(16, forward_c3k2_c3_inner(model, 16, &model->buffers[15], &model->buffers[16], true));
     st = dump_stage(stage_dump, "stage_17_buf16", &model->buffers[16]);
     if (st != SUCCESS) return st;
 
-    st = conv_blk(model, "model.17.conv.weight", "model.17.conv.bias", &model->buffers[16], &model->buffers[17], s2,
-                  true);
-    if (st != SUCCESS) return st;
+    MF_LAP(17, conv_blk(model, "model.17.conv.weight", "model.17.conv.bias", &model->buffers[16], &model->buffers[17],
+                       s2, true));
     st = dump_stage(stage_dump, "stage_18_buf17", &model->buffers[17]);
     if (st != SUCCESS) return st;
 
-    concat_forward(&model->buffers[18], &model->buffers[17], &model->buffers[13], 1);
+    MF_LAP(18, concat_forward(&model->buffers[18], &model->buffers[17], &model->buffers[13], 1));
     st = dump_stage(stage_dump, "stage_19_buf18", &model->buffers[18]);
     if (st != SUCCESS) return st;
 
-    st = forward_c3k2_c3_inner(model, 19, &model->buffers[18], &model->buffers[19], true);
-    if (st != SUCCESS) return st;
+    MF_LAP(19, forward_c3k2_c3_inner(model, 19, &model->buffers[18], &model->buffers[19], true));
     st = dump_stage(stage_dump, "stage_20_buf19", &model->buffers[19]);
     if (st != SUCCESS) return st;
 
-    st = conv_blk(model, "model.20.conv.weight", "model.20.conv.bias", &model->buffers[19], &model->buffers[20], s2,
-                  true);
-    if (st != SUCCESS) return st;
+    MF_LAP(20, conv_blk(model, "model.20.conv.weight", "model.20.conv.bias", &model->buffers[19], &model->buffers[20],
+                       s2, true));
     st = dump_stage(stage_dump, "stage_21_buf20", &model->buffers[20]);
     if (st != SUCCESS) return st;
 
-    concat_forward(&model->buffers[21], &model->buffers[20], &model->buffers[10], 1);
+    MF_LAP(21, concat_forward(&model->buffers[21], &model->buffers[20], &model->buffers[10], 1));
     st = dump_stage(stage_dump, "stage_22_buf21", &model->buffers[21]);
     if (st != SUCCESS) return st;
 
-    st = forward_c3k2_attn_head(model, 22, &model->buffers[21], &model->buffers[22]);
-    if (st != SUCCESS) return st;
+    MF_LAP(22, forward_c3k2_attn_head(model, 22, &model->buffers[21], &model->buffers[22]));
     st = dump_stage(stage_dump, "stage_23_buf22", &model->buffers[22]);
     if (st != SUCCESS) return st;
 
-    st = detect_forward_one2one(model, YOLO26_DETECT_IDX, &model->buffers[16], &model->buffers[19],
-                                 &model->buffers[22], &model->buffers[23]);
-    if (st != SUCCESS) return st;
+    MF_LAP(23, detect_forward_one2one(model, YOLO26_DETECT_IDX, &model->buffers[16], &model->buffers[19],
+                                      &model->buffers[22], &model->buffers[23]));
     st = dump_stage(stage_dump, "stage_24_buf23", &model->buffers[23]);
     if (st != SUCCESS) return st;
     st = dump_stage(stage_dump, "stage_25_detect", &model->buffers[23]);
     if (st != SUCCESS) return st;
 
-    return tensor_copy(output, &model->buffers[23]);
+    MF_LAP(24, tensor_copy(output, &model->buffers[23]));
+
+#undef MF_LAP
+
+    if (profile) {
+        for (int i = 0; i < MODEL_FORWARD_PROFILE_STEPS; i++) {
+            profile->ms_sum[i] += lap[i];
+            profile->ms_last[i] = lap[i];
+        }
+        profile->runs++;
+    }
+
+    return st;
 }

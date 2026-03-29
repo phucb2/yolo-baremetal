@@ -12,8 +12,8 @@ ifeq ($(shell uname -s),Darwin)
 endif
 TARGET = yolo26_bench
 BUILD_DIR = build
-CFLAGS = -O3 -Iinclude -Wall -Wextra -std=c11
-LDFLAGS = -framework Foundation -framework AVFoundation -framework CoreVideo -framework CoreMedia
+CFLAGS = -O3 -Iinclude -Ithird_party -Wall -Wextra -std=c11
+LDFLAGS = -framework Foundation -framework AVFoundation -framework CoreVideo -framework CoreMedia -lm
 
 UNAME_M := $(shell uname -m)
 

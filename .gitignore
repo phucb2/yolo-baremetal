@@ -6,3 +6,5 @@ yolo26_bench
 # python cache
 tools/__pycache__/*
 runs/*
+*.bmp
+.cursor/*.log

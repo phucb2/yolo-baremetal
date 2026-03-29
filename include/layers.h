@@ -60,4 +60,20 @@ status_t c2psa_forward(tensor_t* output, const tensor_t* input, int n_blocks, fl
                        const tensor_t* cv1_w, const tensor_t* cv1_b, const tensor_t* cv2_w, const tensor_t* cv2_b,
                        const tensor_t* psa_weights, tensor_t* buffers);
 
+/* Single PSABlock (Ultralytics): Attention + FFN; same 10 tensors per block as C2PSA (qkv…ffn1). */
+status_t psablock_forward(tensor_t* output, const tensor_t* input, bool shortcut,
+                          const tensor_t* qkv_w, const tensor_t* qkv_b, const tensor_t* proj_w,
+                          const tensor_t* proj_b, const tensor_t* pe_w, const tensor_t* pe_b,
+                          const tensor_t* ffn0_w, const tensor_t* ffn0_b, const tensor_t* ffn1_w,
+                          const tensor_t* ffn1_b, int num_heads, float attn_ratio);
+
+/* Depthwise 3x3 same padding (Ultralytics DWConv k=3); weight [C,1,3,3], bias [C]. */
+status_t dwconv3x3_same_forward(tensor_t* out, const tensor_t* in, const tensor_t* w, const tensor_t* bias);
+
+/* C3 (Ultralytics): cv3(cat(m(cv1(x)), cv2(x))). b_weights: n Bottlenecks × 4 tensors each.
+ * buffers[0] cv1 out; [1] cv2 out; [2] bottleneck temp; [3] m chain; [4] concat 2*c_ */
+status_t c3_forward(tensor_t* output, const tensor_t* input, const tensor_t* cv1_w, const tensor_t* cv1_b,
+                    const tensor_t* cv2_w, const tensor_t* cv2_b, const tensor_t* cv3_w, const tensor_t* cv3_b,
+                    const tensor_t* b_weights, int n_bottles, bool shortcut, tensor_t* buffers);
+
 #endif

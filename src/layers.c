@@ -151,6 +151,37 @@ status_t c3k2_forward(tensor_t* output, const tensor_t* input,
     return conv_block_forward(output, combined, cv2_w, cv2_b, p2, true);
 }
 
+status_t c3_forward(tensor_t* output, const tensor_t* input, const tensor_t* cv1_w, const tensor_t* cv1_b,
+                    const tensor_t* cv2_w, const tensor_t* cv2_b, const tensor_t* cv3_w, const tensor_t* cv3_b,
+                    const tensor_t* b_weights, int n_bottles, bool shortcut, tensor_t* buffers) {
+    if (!output || !input || !cv1_w || !cv1_b || !cv2_w || !cv2_b || !cv3_w || !cv3_b || !b_weights || !buffers)
+        return ERROR_NULL_POINTER;
+    conv_params_t p1 = {1, 0, 1};
+    status_t st = conv_block_forward(&buffers[0], input, cv1_w, cv1_b, p1, true);
+    if (st != SUCCESS) return st;
+    st = conv_block_forward(&buffers[1], input, cv2_w, cv2_b, p1, true);
+    if (st != SUCCESS) return st;
+
+    int h = buffers[0].dims[2], w = buffers[0].dims[3];
+    int plane = h * w;
+    tensor_t* prev = &buffers[0];
+    tensor_t* m_out = &buffers[3];
+    for (int i = 0; i < n_bottles; i++) {
+        st = bottleneck_forward(m_out, prev, &b_weights[i * 4 + 0], &b_weights[i * 4 + 1], &b_weights[i * 4 + 2],
+                                &b_weights[i * 4 + 3], shortcut, &buffers[2]);
+        if (st != SUCCESS) return st;
+        prev = m_out;
+    }
+
+    int c_m = m_out->dims[1];
+    int c_v2 = buffers[1].dims[1];
+    tensor_t* concat = &buffers[4];
+    memcpy(concat->data, m_out->data, (size_t)c_m * plane * sizeof(float));
+    memcpy(concat->data + (size_t)c_m * plane, buffers[1].data, (size_t)c_v2 * plane * sizeof(float));
+
+    return conv_block_forward(output, concat, cv3_w, cv3_b, p1, true);
+}
+
 status_t pool2d_max_forward(tensor_t* output, const tensor_t* input, int kernel_size, int stride) {
     if (!output || !input) return ERROR_NULL_POINTER;
     int n = input->dims[0], c = input->dims[1], in_h = input->dims[2], in_w = input->dims[3];
@@ -229,7 +260,7 @@ status_t sppf_forward(tensor_t* output, const tensor_t* input,
 
 /* --- C2PSA: depthwise 3x3 (pe), Attention, PSABlock, C2PSA (Ultralytics) --- */
 
-static status_t depthwise_conv3x3_same(tensor_t* out, const tensor_t* in, const tensor_t* w, const tensor_t* bias) {
+status_t dwconv3x3_same_forward(tensor_t* out, const tensor_t* in, const tensor_t* w, const tensor_t* bias) {
     if (!out || !in || !w) return ERROR_NULL_POINTER;
     int c = in->dims[1], h = in->dims[2], wi = in->dims[3];
     int pad = 1;
@@ -351,7 +382,7 @@ static status_t attention_forward(tensor_t* output, const tensor_t* input, int n
     memcpy(attn_tensor.data, attn_out, (size_t)dim * (size_t)N * sizeof(float));
     free(attn_out);
 
-    depthwise_conv3x3_same(&pe_out, &v_pe, pe_w, pe_b);
+    dwconv3x3_same_forward(&pe_out, &v_pe, pe_w, pe_b);
 
     for (size_t i = 0; i < (size_t)dim * (size_t)N; i++) {
         attn_tensor.data[i] += pe_out.data[i];
@@ -367,11 +398,11 @@ static status_t attention_forward(tensor_t* output, const tensor_t* input, int n
     return st;
 }
 
-static status_t psa_block_forward(tensor_t* output, const tensor_t* input, bool shortcut,
-                                  const tensor_t* qkv_w, const tensor_t* qkv_b, const tensor_t* proj_w,
-                                  const tensor_t* proj_b, const tensor_t* pe_w, const tensor_t* pe_b,
-                                  const tensor_t* ffn0_w, const tensor_t* ffn0_b, const tensor_t* ffn1_w,
-                                  const tensor_t* ffn1_b, int num_heads, float attn_ratio) {
+status_t psablock_forward(tensor_t* output, const tensor_t* input, bool shortcut,
+                          const tensor_t* qkv_w, const tensor_t* qkv_b, const tensor_t* proj_w,
+                          const tensor_t* proj_b, const tensor_t* pe_w, const tensor_t* pe_b,
+                          const tensor_t* ffn0_w, const tensor_t* ffn0_b, const tensor_t* ffn1_w,
+                          const tensor_t* ffn1_b, int num_heads, float attn_ratio) {
     tensor_t attn_out;
     if (tensor_allocate(&attn_out, 1, input->dims[1], input->dims[2], input->dims[3]) != SUCCESS)
         return ERROR_OUT_OF_MEMORY;
@@ -446,8 +477,8 @@ status_t c2psa_forward(tensor_t* output, const tensor_t* input, int n_blocks, fl
 
     for (int bi = 0; bi < n_blocks; bi++) {
         const tensor_t* w = psa_weights + bi * 10;
-        st = psa_block_forward(&buffers[1], &b_view, true, w + 0, w + 1, w + 2, w + 3, w + 4, w + 5, w + 6, w + 7,
-                               w + 8, w + 9, num_heads, attn_ratio);
+        st = psablock_forward(&buffers[1], &b_view, true, w + 0, w + 1, w + 2, w + 3, w + 4, w + 5, w + 6, w + 7,
+                              w + 8, w + 9, num_heads, attn_ratio);
         if (st != SUCCESS) return st;
         memcpy(b_view.data, buffers[1].data, (size_t)c_hidden * plane * sizeof(float));
     }

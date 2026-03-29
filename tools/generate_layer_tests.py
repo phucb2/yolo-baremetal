@@ -1,6 +1,7 @@
 """
-Generate golden .bin tensors for C layer parity tests. Requires conda env with torch + ultralytics (e.g. conda activate py39).
-Run from repo root: python tools/generate_layer_tests.py
+Generate golden .bin tensors for C layer parity tests. Requires conda env py39 with torch + ultralytics.
+Run from repo root: conda activate py39 && python tools/generate_layer_tests.py
+Or: bash tools/with_py39.sh python tools/generate_layer_tests.py
 """
 
 from __future__ import annotations

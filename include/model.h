@@ -6,6 +6,8 @@
 #include "detection.h"
 
 #define MAX_MODEL_LAYERS 32
+/* Detect sequential index for the wired yolo26 graph (model.23.*). Fixed; not configurable at runtime. */
+#define YOLO26_DETECT_IDX 23
 
 typedef struct {
     char name[128];

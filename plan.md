@@ -26,11 +26,11 @@ Build a standalone, zero-dependency C framework for YOLO26 inference on x86_64 C
 | :--- | :--- |
 | Tensor + SIMD GEMM, layers (sample conv), BN fold, binary loader, decode | `make verify` runs `tests/test_core` and `py_compile` on `tools/converter.py`. |
 | SIMD flags (x86_64) | Observed in `Makefile` (`-mavx2 -mfma`); ARM uses `-mcpu=apple-m1`. |
-| C3k2 vs PyTorch | See [plan_c3k2.md](plan_c3k2.md): `make verify` runs `tests/test_core` C3k2 parity on `tests/data/c3k2_*.bin`; regenerate with `python tools/generate_layer_tests.py` (needs Ultralytics, e.g. `conda activate py39`). |
+| C3k2 vs PyTorch | See [plan_c3k2.md](plan_c3k2.md): `make verify` runs `tests/test_core` C3k2 parity on `tests/data/c3k2_*.bin`; regenerate with `conda activate py39` then `python tools/generate_layer_tests.py`, or `make regenerate-golden` (uses [tools/with_py39.sh](tools/with_py39.sh)). |
 | SPPF vs PyTorch | `sppf_forward` in `src/layers.c` (cv1 linear, chained pools, optional shortcut); parity in `tests/test_core` on `tests/data/sppf_test.bin` and `sppf_shortcut.bin` (regenerate with `python tools/generate_layer_tests.py`). |
 | C2PSA vs PyTorch | See [plan_c2psa.md](plan_c2psa.md): `c2psa_forward` in `src/layers.c`; parity on `tests/data/c2psa_test.bin` from `generate_layer_tests.py`. |
 | Camera shim | Build includes `src/camera_darwin.m`; runtime needs macOS + camera. Smoke: build `yolo26_bench` and run (expects `weights/yolo26.bin`). |
-| `.pt` → `.bin` export | Requires PyTorch + checkpoint: `python3 tools/converter.py --model <path.pt> --output weights/yolo26.bin`. |
+| `.pt` → `.bin` export | Requires PyTorch + checkpoint in conda `py39`: `conda activate py39` then `python tools/converter.py --model <path.pt> --output weights/yolo26.bin`. |
 
 `tests/verify_layers.c` is a stub; use `tests/test_core.c` for automated checks (including C3k2 parity — [plan_c3k2.md](plan_c3k2.md)).
 

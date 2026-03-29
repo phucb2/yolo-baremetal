@@ -1,12 +1,12 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include "tensor.h"
 #include "layers.h"
 #include "detection.h"
 #include "model.h"
 #include "camera.h"
 #include "utils.h"
+#include "visualize.h"
 
 void preprocess(tensor_t* input_tensor, const uint8_t* rgb_buffer, int w, int h) {
     float* data = input_tensor->data;
@@ -21,7 +21,7 @@ void preprocess(tensor_t* input_tensor, const uint8_t* rgb_buffer, int w, int h)
     }
 }
 
-int main() {
+int main(int argc, char** argv) {
     const int W = 640, H = 640;
     model_t model;
     model_create(&model, W, H);
@@ -43,23 +43,18 @@ int main() {
     tensor_t input_tensor;
     tensor_allocate(&input_tensor, 1, 3, H, W);
     
-    // Dummy detection head output for testing [1, 300, 85] (COCO)
+    /* Postprocess layout [1, max_det, 6]: xyxy (pixels), score, class — filled by model_forward → detect. */
     tensor_t head_output;
-    tensor_allocate(&head_output, 1, 300, 85, 1);
-    tensor_fill(&head_output, 0.0f);
-    
-    // Inject a dummy detection
-    head_output.data[0 * 85 + 0] = 0.5f; // cx
-    head_output.data[0 * 85 + 1] = 0.5f; // cy
-    head_output.data[0 * 85 + 2] = 0.2f; // w
-    head_output.data[0 * 85 + 3] = 0.2f; // h
-    head_output.data[0 * 85 + 4 + 0] = 0.9f; // class 0 score
+    tensor_allocate(&head_output, 1, 300, 6, 1);
     
     detection_results_t results;
     results.capacity = 100;
     results.detections = malloc(sizeof(detection_t) * results.capacity);
     
     printf("Starting inference loop. Press Ctrl+C to stop.\n");
+    if (argc >= 2) {
+        printf("Saving annotated frames to %s (last frame wins).\n", argv[1]);
+    }
     
     for (int i = 0; i < 5; i++) {
         printf("\n--- Frame %d ---\n", i);
@@ -72,15 +67,25 @@ int main() {
         preprocess(&input_tensor, rgb_buffer, W, H);
         BENCH_STOP(preprocess);
         
-        BENCH_START(inference_dummy);
-        // In a real scenario, we'd run the full YOLO26 layers here
-        // For now, we simulate with a dummy latency
-        usleep(20000); 
-        BENCH_STOP(inference_dummy);
-        
+        BENCH_START(inference);
+        status_t inf_st = model_forward(&model, &input_tensor, &head_output);
+        BENCH_STOP(inference);
+        if (inf_st != SUCCESS) {
+            fprintf(stderr, "model_forward failed (%d)\n", (int)inf_st);
+            results.count = 0;
+            continue;
+        }
+
         BENCH_START(decode);
-        decode_detections(&results, &head_output, 0.5f, (float)W, (float)H);
+        decode_detections(&results, &head_output, 0.5f);
         BENCH_STOP(decode);
+
+        if (argc >= 2) {
+            status_t viz_st = visualize_save_frame_bmp(argv[1], rgb_buffer, W, H, &results, 2);
+            if (viz_st != SUCCESS) {
+                fprintf(stderr, "visualize_save_frame_bmp failed (%d)\n", (int)viz_st);
+            }
+        }
         
         printf("Detections: %d\n", results.count);
         for (int d = 0; d < results.count; d++) {

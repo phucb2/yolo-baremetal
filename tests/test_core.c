@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "detection.h"
+#include "detect.h"
 #include "layers.h"
 #include "model.h"
 #include "tensor.h"
@@ -123,6 +124,39 @@ static void write_named_tensor(FILE* f, const char* name, int n, int c, int h, i
         float v = fill;
         fwrite(&v, sizeof(float), 1, f);
     }
+}
+
+static void test_fold_bn_nested_names_load(void) {
+    /* Unfused nested Conv+BN; fold_all_bn should fuse and drop *.bn.* (same math as test_fold_bn). */
+    char path[] = "/tmp/yolo26_nested_bn.bin";
+    FILE* f = fopen(path, "wb");
+    assert(f);
+    int nc = 80;
+    int total = 6;
+    fwrite(&nc, sizeof(int), 1, f);
+    fwrite(&total, sizeof(int), 1, f);
+    write_named_tensor(f, "model.2.cv1.conv.weight", 1, 1, 1, 1, 2.0f);
+    write_named_tensor(f, "model.2.cv1.conv.bias", 1, 1, 1, 1, 1.0f);
+    write_named_tensor(f, "model.2.cv1.bn.weight", 1, 1, 1, 1, 1.0f);
+    write_named_tensor(f, "model.2.cv1.bn.bias", 1, 1, 1, 1, 0.0f);
+    write_named_tensor(f, "model.2.cv1.bn.running_mean", 1, 1, 1, 1, 0.0f);
+    write_named_tensor(f, "model.2.cv1.bn.running_var", 1, 1, 1, 1, 1.0f);
+    fclose(f);
+
+    model_t model;
+    model_create(&model, 64, 64);
+    status_t st = model_load_weights(&model, path);
+    CHECK(st == SUCCESS, "nested bn model_load_weights");
+    CHECK(model.num_weights == 2, "nested bn: conv.w + conv.bias only after fold");
+    tensor_t* cw = model_get_weight(&model, "model.2.cv1.conv.weight");
+    tensor_t* cb = model_get_weight(&model, "model.2.cv1.conv.bias");
+    CHECK(cw && cb, "nested fused tensors");
+    CHECK(model_get_weight(&model, "model.2.cv1.bn.weight") == NULL, "bn.weight removed");
+    float scale = 1.0f / sqrtf(1.0f + 1e-5f);
+    CHECK(fabsf(cw->data[0] - 2.0f * scale) < 1e-5f, "nested folded w");
+    CHECK(fabsf(cb->data[0] - 1.0f * scale) < 1e-5f, "nested folded b");
+    model_destroy(&model);
+    remove(path);
 }
 
 static void test_model_load_minimal(void) {
@@ -432,23 +466,47 @@ static void test_c2psa_fixture(void) {
 
 static void test_decode_detections(void) {
     tensor_t head;
-    tensor_allocate(&head, 1, 2, 85, 1);
+    tensor_allocate(&head, 1, 2, 6, 1);
     tensor_fill(&head, 0.0f);
-    head.data[0 * 85 + 0] = 0.5f;
-    head.data[0 * 85 + 1] = 0.5f;
-    head.data[0 * 85 + 2] = 0.2f;
-    head.data[0 * 85 + 3] = 0.2f;
-    head.data[0 * 85 + 4 + 3] = 0.95f;
+    /* Same box as old normalized test: cx,cy,w,h 0.5,0.5,0.2,0.2 on 640x480 -> xyxy pixels */
+    head.data[0] = 256.0f;
+    head.data[1] = 192.0f;
+    head.data[2] = 384.0f;
+    head.data[3] = 288.0f;
+    head.data[4] = 0.95f;
+    head.data[5] = 3.0f;
 
     detection_results_t res;
     detection_t dbuf[2];
     res.detections = dbuf;
     res.capacity = 2;
-    CHECK(decode_detections(&res, &head, 0.5f, 640.0f, 480.0f) == SUCCESS, "decode_detections");
+    CHECK(decode_detections(&res, &head, 0.5f) == SUCCESS, "decode_detections");
     CHECK(res.count == 1, "decode count");
     CHECK(res.detections[0].class_id == 3, "decode class");
     CHECK(fabsf(res.detections[0].x1 - 256.0f) < 1.0f, "decode x1");
+    CHECK(fabsf(res.detections[0].y1 - 192.0f) < 1.0f, "decode y1");
     tensor_free(&head);
+}
+
+static void test_detect_postprocess(void) {
+    /* N=1, nc=3: single row [xyxy] + [p0,p1,p2] */
+    float pred[7];
+    pred[0] = 0.0f;
+    pred[1] = 0.0f;
+    pred[2] = 10.0f;
+    pred[3] = 10.0f;
+    pred[4] = 0.2f;
+    pred[5] = 0.5f;
+    pred[6] = 0.3f;
+
+    tensor_t out;
+    tensor_allocate(&out, 1, 3, 6, 1);
+    tensor_fill(&out, -1.0f);
+    CHECK(detect_postprocess_from_pred(pred, 1, 3, 3, &out) == SUCCESS, "detect_postprocess_from_pred");
+    CHECK(fabsf(out.data[0] - 0.0f) < 1e-5f, "postproc x1");
+    CHECK(fabsf(out.data[4] - 0.5f) < 1e-5f, "postproc score");
+    CHECK(fabsf(out.data[5] - 1.0f) < 1e-5f, "postproc class");
+    tensor_free(&out);
 }
 
 int main(void) {
@@ -457,6 +515,7 @@ int main(void) {
     test_silu();
     test_conv1x1_gemm_path();
     test_fold_bn();
+    test_fold_bn_nested_names_load();
     test_model_load_minimal();
     test_c3k2_fixture("c3k2_unit.bin", "unit", 2, true);
     test_c3k2_fixture("c3k2_yaml.bin", "yaml", 2, false);
@@ -464,6 +523,7 @@ int main(void) {
     test_sppf_fixture("sppf_shortcut.bin", 5, 3, true);
     test_c2psa_fixture();
     test_decode_detections();
+    test_detect_postprocess();
 
     if (failures == 0) {
         printf("test_core: all checks passed\n");

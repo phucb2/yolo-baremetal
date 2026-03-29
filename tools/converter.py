@@ -91,12 +91,12 @@ def export_yolo26_to_bin(model_path: str, output_path: str, no_fuse: bool = Fals
     state_dict: dict[str, torch.Tensor]
 
     if hasattr(model, "state_dict"):
-        if hasattr(model, "fuse"):
-            try:
-                model.fuse()
-                print("Applied model.fuse() (Ultralytics).")
-            except Exception as e:
-                print(f"model.fuse() skipped: {e}")
+        # FP16 checkpoints: cast to FP32 so fuse_conv_bn runs on CPU tensors.
+        if hasattr(model, "float"):
+            model = model.float()
+            print("Cast model to float32 before export.")
+        model.eval()
+        # Do NOT call model.fuse(): it drops Detect cv2/cv3 tensors. C loads one2one_cv2/cv3 when present (end2end), else cv2/cv3.
         state_dict = model.state_dict()
         nc = int(getattr(model, "nc", 80))
     else:

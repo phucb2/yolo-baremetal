@@ -165,20 +165,20 @@ status_t detect_postprocess_from_pred(const float* pred, int N, int nc, int max_
     return SUCCESS;
 }
 
-static status_t run_cv2(model_t* model, int d_idx, int scale, const tensor_t* feat, tensor_t* out_box,
-                                tensor_t* s1, tensor_t* s2) {
+static status_t run_cv2(model_t* model, int d_idx, const char* cv2_branch, int scale, const tensor_t* feat,
+                        tensor_t* out_box, tensor_t* s1, tensor_t* s2) {
     char name[200];
-    snprintf(name, sizeof name, "model.%d.cv2.%d.0.conv.weight", d_idx, scale);
+    snprintf(name, sizeof name, "model.%d.%s.%d.0.conv.weight", d_idx, cv2_branch, scale);
     const tensor_t* w0 = model_get_weight(model, name);
-    snprintf(name, sizeof name, "model.%d.cv2.%d.0.conv.bias", d_idx, scale);
+    snprintf(name, sizeof name, "model.%d.%s.%d.0.conv.bias", d_idx, cv2_branch, scale);
     const tensor_t* b0 = model_get_weight(model, name);
-    snprintf(name, sizeof name, "model.%d.cv2.%d.1.conv.weight", d_idx, scale);
+    snprintf(name, sizeof name, "model.%d.%s.%d.1.conv.weight", d_idx, cv2_branch, scale);
     const tensor_t* w1 = model_get_weight(model, name);
-    snprintf(name, sizeof name, "model.%d.cv2.%d.1.conv.bias", d_idx, scale);
+    snprintf(name, sizeof name, "model.%d.%s.%d.1.conv.bias", d_idx, cv2_branch, scale);
     const tensor_t* b1 = model_get_weight(model, name);
-    snprintf(name, sizeof name, "model.%d.cv2.%d.2.weight", d_idx, scale);
+    snprintf(name, sizeof name, "model.%d.%s.%d.2.weight", d_idx, cv2_branch, scale);
     const tensor_t* w2 = model_get_weight(model, name);
-    snprintf(name, sizeof name, "model.%d.cv2.%d.2.bias", d_idx, scale);
+    snprintf(name, sizeof name, "model.%d.%s.%d.2.bias", d_idx, cv2_branch, scale);
     const tensor_t* b2 = model_get_weight(model, name);
     if (!w0 || !b0 || !w1 || !b1 || !w2 || !b2) return ERROR_FILE_NOT_FOUND;
 
@@ -190,28 +190,28 @@ static status_t run_cv2(model_t* model, int d_idx, int scale, const tensor_t* fe
     return conv2d_forward(out_box, s2, w2, b2, (conv_params_t){1, 0, 1});
 }
 
-static status_t run_cv3(model_t* model, int d_idx, int scale, const tensor_t* feat, tensor_t* out_cls,
-                                tensor_t* t_dw0, tensor_t* t_pw0, tensor_t* t_dw1, tensor_t* t_pw1) {
+static status_t run_cv3(model_t* model, int d_idx, const char* cv3_branch, int scale, const tensor_t* feat,
+                        tensor_t* out_cls, tensor_t* t_dw0, tensor_t* t_pw0, tensor_t* t_dw1, tensor_t* t_pw1) {
     char name[200];
-    snprintf(name, sizeof name, "model.%d.cv3.%d.0.0.conv.weight", d_idx, scale);
+    snprintf(name, sizeof name, "model.%d.%s.%d.0.0.conv.weight", d_idx, cv3_branch, scale);
     const tensor_t* dw00 = model_get_weight(model, name);
-    snprintf(name, sizeof name, "model.%d.cv3.%d.0.0.conv.bias", d_idx, scale);
+    snprintf(name, sizeof name, "model.%d.%s.%d.0.0.conv.bias", d_idx, cv3_branch, scale);
     const tensor_t* db00 = model_get_weight(model, name);
-    snprintf(name, sizeof name, "model.%d.cv3.%d.0.1.conv.weight", d_idx, scale);
+    snprintf(name, sizeof name, "model.%d.%s.%d.0.1.conv.weight", d_idx, cv3_branch, scale);
     const tensor_t* pw00 = model_get_weight(model, name);
-    snprintf(name, sizeof name, "model.%d.cv3.%d.0.1.conv.bias", d_idx, scale);
+    snprintf(name, sizeof name, "model.%d.%s.%d.0.1.conv.bias", d_idx, cv3_branch, scale);
     const tensor_t* pb00 = model_get_weight(model, name);
-    snprintf(name, sizeof name, "model.%d.cv3.%d.1.0.conv.weight", d_idx, scale);
+    snprintf(name, sizeof name, "model.%d.%s.%d.1.0.conv.weight", d_idx, cv3_branch, scale);
     const tensor_t* dw10 = model_get_weight(model, name);
-    snprintf(name, sizeof name, "model.%d.cv3.%d.1.0.conv.bias", d_idx, scale);
+    snprintf(name, sizeof name, "model.%d.%s.%d.1.0.conv.bias", d_idx, cv3_branch, scale);
     const tensor_t* db10 = model_get_weight(model, name);
-    snprintf(name, sizeof name, "model.%d.cv3.%d.1.1.conv.weight", d_idx, scale);
+    snprintf(name, sizeof name, "model.%d.%s.%d.1.1.conv.weight", d_idx, cv3_branch, scale);
     const tensor_t* pw10 = model_get_weight(model, name);
-    snprintf(name, sizeof name, "model.%d.cv3.%d.1.1.conv.bias", d_idx, scale);
+    snprintf(name, sizeof name, "model.%d.%s.%d.1.1.conv.bias", d_idx, cv3_branch, scale);
     const tensor_t* pb10 = model_get_weight(model, name);
-    snprintf(name, sizeof name, "model.%d.cv3.%d.2.weight", d_idx, scale);
+    snprintf(name, sizeof name, "model.%d.%s.%d.2.weight", d_idx, cv3_branch, scale);
     const tensor_t* wf = model_get_weight(model, name);
-    snprintf(name, sizeof name, "model.%d.cv3.%d.2.bias", d_idx, scale);
+    snprintf(name, sizeof name, "model.%d.%s.%d.2.bias", d_idx, cv3_branch, scale);
     const tensor_t* bf = model_get_weight(model, name);
     if (!dw00 || !db00 || !pw00 || !pb00 || !dw10 || !db10 || !pw10 || !pb10 || !wf || !bf)
         return ERROR_FILE_NOT_FOUND;
@@ -293,6 +293,11 @@ status_t detect_forward_one2one(model_t* model, int detect_module_idx, const ten
     }
 
     int d = detect_module_idx;
+    char probe[200];
+    snprintf(probe, sizeof probe, "model.%d.one2one_cv2.0.0.conv.weight", d);
+    const char* cv2_branch = model_get_weight(model, probe) ? "one2one_cv2" : "cv2";
+    const char* cv3_branch = (cv2_branch[0] == 'o') ? "one2one_cv3" : "cv3";
+
     int offset = 0;
     char name[200];
     for (int s = 0; s < 3; s++) {
@@ -300,10 +305,10 @@ status_t detect_forward_one2one(model_t* model, int detect_module_idx, const ten
         int h = H[s], w = W[s];
         int c_in = feat->dims[1];
 
-        snprintf(name, sizeof name, "model.%d.cv2.%d.0.conv.weight", d, s);
+        snprintf(name, sizeof name, "model.%d.%s.%d.0.conv.weight", d, cv2_branch, s);
         const tensor_t* w0 = model_get_weight(model, name);
         int c2 = w0 ? w0->dims[0] : 16;
-        snprintf(name, sizeof name, "model.%d.cv3.%d.0.1.conv.weight", d, s);
+        snprintf(name, sizeof name, "model.%d.%s.%d.0.1.conv.weight", d, cv3_branch, s);
         const tensor_t* pw0w = model_get_weight(model, name);
         int c3 = pw0w ? pw0w->dims[0] : nc;
 
@@ -359,7 +364,7 @@ status_t detect_forward_one2one(model_t* model, int detect_module_idx, const ten
             goto oom;
         }
 
-        status_t stt = run_cv2(model, d, s, feat, &out_box, &s1, &s2);
+        status_t stt = run_cv2(model, d, cv2_branch, s, feat, &out_box, &s1, &s2);
         if (stt != SUCCESS) {
             tensor_free(&out_cls);
             tensor_free(&t_pw1);
@@ -371,7 +376,7 @@ status_t detect_forward_one2one(model_t* model, int detect_module_idx, const ten
             tensor_free(&out_box);
             goto fail;
         }
-        stt = run_cv3(model, d, s, feat, &out_cls, &t_dw0, &t_pw0, &t_dw1, &t_pw1);
+        stt = run_cv3(model, d, cv3_branch, s, feat, &out_cls, &t_dw0, &t_pw0, &t_dw1, &t_pw1);
         if (stt != SUCCESS) {
             tensor_free(&out_cls);
             tensor_free(&t_pw1);

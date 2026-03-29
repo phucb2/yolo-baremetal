@@ -1,2 +1,8 @@
 *.pt
 weights/*
+*.o
+py_inference_out/
+yolo26_bench
+# python cache
+tools/__pycache__/*
+runs/*

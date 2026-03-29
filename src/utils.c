@@ -1,4 +1,7 @@
 #include <math.h>
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
 #include "utils.h"
 #include "tensor.h"
 
@@ -51,7 +54,27 @@ status_t load_named_tensor(FILE* f, char* name, tensor_t* tensor) {
     if (status != SUCCESS) return status;
     
     size_t total_elements = (size_t)dims[0] * dims[1] * dims[2] * dims[3];
-    fread(tensor->data, sizeof(float), total_elements, f);
+    size_t nread = fread(tensor->data, sizeof(float), total_elements, f);
+    UTIL_DEBUG_LOG_TENSOR_LOAD(name, total_elements, nread);
+    if (nread != total_elements) {
+        tensor_free(tensor);
+        return ERROR_INVALID_FORMAT;
+    }
+    return SUCCESS;
+}
+
+status_t save_named_tensor(FILE* f, const char* name, const tensor_t* tensor) {
+    if (!f || !name || !tensor || !tensor->data) return ERROR_NULL_POINTER;
+    int name_len = (int)strlen(name);
+    if (fwrite(&name_len, sizeof(int), 1, f) != 1) return ERROR_FILE_NOT_FOUND;
+    if (fwrite(name, 1, (size_t)name_len, f) != (size_t)name_len) return ERROR_FILE_NOT_FOUND;
+    int dim_count = 4;
+    if (fwrite(&dim_count, sizeof(int), 1, f) != 1) return ERROR_FILE_NOT_FOUND;
+    for (int d = 0; d < 4; d++) {
+        if (fwrite(&tensor->dims[d], sizeof(int), 1, f) != 1) return ERROR_FILE_NOT_FOUND;
+    }
+    size_t n = (size_t)tensor->dims[0] * (size_t)tensor->dims[1] * (size_t)tensor->dims[2] * (size_t)tensor->dims[3];
+    if (fwrite(tensor->data, sizeof(float), n, f) != n) return ERROR_FILE_NOT_FOUND;
     return SUCCESS;
 }
 

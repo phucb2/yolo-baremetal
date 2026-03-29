@@ -164,19 +164,23 @@ status_t c3_forward(tensor_t* output, const tensor_t* input, const tensor_t* cv1
 
     int h = buffers[0].dims[2], w = buffers[0].dims[3];
     int plane = h * w;
-    tensor_t* prev = &buffers[0];
-    tensor_t* m_out = &buffers[3];
+    /* Ping-pong buffers[0] and buffers[3]: second+ Bottleneck must not use the same tensor as in and out. */
+    tensor_t* in_ptr = &buffers[0];
+    tensor_t* out_ptr = &buffers[3];
     for (int i = 0; i < n_bottles; i++) {
-        st = bottleneck_forward(m_out, prev, &b_weights[i * 4 + 0], &b_weights[i * 4 + 1], &b_weights[i * 4 + 2],
+        st = bottleneck_forward(out_ptr, in_ptr, &b_weights[i * 4 + 0], &b_weights[i * 4 + 1], &b_weights[i * 4 + 2],
                                 &b_weights[i * 4 + 3], shortcut, &buffers[2]);
         if (st != SUCCESS) return st;
-        prev = m_out;
+        tensor_t* t = in_ptr;
+        in_ptr = out_ptr;
+        out_ptr = t;
     }
+    tensor_t* m_final = in_ptr;
 
-    int c_m = m_out->dims[1];
+    int c_m = m_final->dims[1];
     int c_v2 = buffers[1].dims[1];
     tensor_t* concat = &buffers[4];
-    memcpy(concat->data, m_out->data, (size_t)c_m * plane * sizeof(float));
+    memcpy(concat->data, m_final->data, (size_t)c_m * plane * sizeof(float));
     memcpy(concat->data + (size_t)c_m * plane, buffers[1].data, (size_t)c_v2 * plane * sizeof(float));
 
     return conv_block_forward(output, concat, cv3_w, cv3_b, p1, true);

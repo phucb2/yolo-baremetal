@@ -1,52 +1,84 @@
-# Python tools that need torch + ultralytics: use conda env py39, e.g.
-#   source "$(conda info --base)/etc/profile.d/conda.sh" && conda activate py39
-# or: bash tools/with_py39.sh python tools/generate_layer_tests.py
+# Python tools (torch/ultralytics): conda env py39 or tools/with_py39.sh
 
 CC = clang
-# On macOS, prefer Xcode/CLT clang (xcrun). Conda-shim clang can fail on SDK math.h (_Float16) with project CFLAGS.
 ifeq ($(shell uname -s),Darwin)
-  XCRUN_CLANG := $(shell xcrun -f clang 2>/dev/null)
-  ifneq ($(XCRUN_CLANG),)
-    CC := $(XCRUN_CLANG)
+  XCRUN := $(shell xcrun -f clang 2>/dev/null)
+  ifneq ($(XCRUN),)
+    CC := $(XCRUN)
   endif
 endif
+
 TARGET = yolo26_bench
 BUILD_DIR = build
 CFLAGS = -O3 -Iinclude -Ithird_party -Wall -Wextra -std=c11
 LDFLAGS = -framework Foundation -framework AVFoundation -framework CoreVideo -framework CoreMedia -lm
 
-UNAME_M := $(shell uname -m)
-
-ifeq ($(UNAME_M), arm64)
-	CFLAGS += -mcpu=apple-m1
+# Without -isysroot, clang may not find system headers (e.g. stdlib.h) while parsing intrinsics.
+ifeq ($(shell uname -s),Darwin)
+  MACOS_SDK := $(shell xcrun --show-sdk-path 2>/dev/null)
+  ifneq ($(MACOS_SDK),)
+    CFLAGS += -isysroot $(MACOS_SDK)
+    LDFLAGS += -isysroot $(MACOS_SDK)
+  endif
 endif
 
-ifeq ($(UNAME_M), x86_64)
+UNAME_M := $(shell uname -m)
+ifeq ($(UNAME_M),arm64)
+	CFLAGS += -mcpu=apple-m1
+endif
+ifeq ($(UNAME_M),x86_64)
 	CFLAGS += -mavx2 -mfma -march=native
 endif
 
-OBJ = $(BUILD_DIR)/tensor.o $(BUILD_DIR)/utils.o $(BUILD_DIR)/layers.o $(BUILD_DIR)/detection.o $(BUILD_DIR)/detect.o $(BUILD_DIR)/model.o $(BUILD_DIR)/visualize.o $(BUILD_DIR)/main.o $(BUILD_DIR)/camera_darwin.o
+# OpenBLAS: USE_OPENBLAS=1. Default OPENBLAS_PREFIX is Apple Silicon Homebrew; Intel Mac: OPENBLAS_PREFIX=/usr/local/opt/openblas
+USE_OPENBLAS ?= 0
+TENSOR_OBJ = $(BUILD_DIR)/tensor_u$(USE_OPENBLAS).o
+BLAS_LDFLAGS :=
+ifeq ($(USE_OPENBLAS),1)
+	CFLAGS += -DUSE_OPENBLAS
+	OPENBLAS_PREFIX ?= /opt/homebrew/opt/openblas
+	CFLAGS += -I$(OPENBLAS_PREFIX)/include
+	BLAS_LDFLAGS := -L$(OPENBLAS_PREFIX)/lib -lopenblas
+endif
 
-CORE_OBJ = $(BUILD_DIR)/tensor.o $(BUILD_DIR)/utils.o $(BUILD_DIR)/layers.o $(BUILD_DIR)/detection.o $(BUILD_DIR)/detect.o $(BUILD_DIR)/model.o
+OBJ = $(TENSOR_OBJ) $(BUILD_DIR)/utils.o $(BUILD_DIR)/layers.o $(BUILD_DIR)/detection.o $(BUILD_DIR)/detect.o $(BUILD_DIR)/model.o $(BUILD_DIR)/visualize.o $(BUILD_DIR)/main.o $(BUILD_DIR)/camera_darwin.o
+CORE_OBJ = $(TENSOR_OBJ) $(BUILD_DIR)/utils.o $(BUILD_DIR)/layers.o $(BUILD_DIR)/detection.o $(BUILD_DIR)/detect.o $(BUILD_DIR)/model.o
 TEST_CORE = tests/test_core
 VERIFY_LAYERS = tests/verify_layers
+BENCH_GEMM = tests/bench_gemm
 
 $(TARGET): $(OBJ)
-	$(CC) $(OBJ) -o $(TARGET) $(LDFLAGS)
+	$(CC) $(OBJ) -o $(TARGET) $(LDFLAGS) $(BLAS_LDFLAGS)
 
 $(TEST_CORE): tests/test_core.c $(CORE_OBJ)
-	$(CC) $(CFLAGS) tests/test_core.c $(CORE_OBJ) -o $(TEST_CORE) -lm
+	$(CC) $(CFLAGS) tests/test_core.c $(CORE_OBJ) -o $(TEST_CORE) -lm $(BLAS_LDFLAGS)
 
 $(VERIFY_LAYERS): tests/verify_layers.c $(CORE_OBJ)
-	$(CC) $(CFLAGS) tests/verify_layers.c $(CORE_OBJ) -o $(VERIFY_LAYERS) -lm
+	$(CC) $(CFLAGS) tests/verify_layers.c $(CORE_OBJ) -o $(VERIFY_LAYERS) -lm $(BLAS_LDFLAGS)
 
 verify: $(TEST_CORE) $(TARGET)
 	./$(TEST_CORE)
 	python3 -m py_compile tools/converter.py tools/generate_layer_tests.py tools/inference_py.py
 
-# Regenerate tests/data/*.bin goldens (requires conda activate py39).
+# Unit tests + golden layer parity (fixtures under tests/data/ are optional; missing bins SKIP).
+.PHONY: e2e
+e2e: $(TEST_CORE) $(TARGET) $(VERIFY_LAYERS)
+	./$(TEST_CORE)
+	python3 -m py_compile tools/converter.py tools/generate_layer_tests.py tools/inference_py.py
+	./$(VERIFY_LAYERS)
+
+$(BENCH_GEMM): tests/bench_gemm.c $(TENSOR_OBJ) $(BUILD_DIR)/utils.o | $(BUILD_DIR)
+	$(CC) $(CFLAGS) tests/bench_gemm.c $(TENSOR_OBJ) $(BUILD_DIR)/utils.o -o $(BENCH_GEMM) -lm $(BLAS_LDFLAGS)
+
+.PHONY: bench
+bench: $(BENCH_GEMM)
+	./$(BENCH_GEMM)
+
 regenerate-golden:
 	bash tools/with_py39.sh python tools/generate_layer_tests.py
+
+$(BUILD_DIR)/tensor_u0.o $(BUILD_DIR)/tensor_u1.o: src/tensor.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/%.o: src/%.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -58,4 +90,4 @@ $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
 clean:
-	rm -rf $(BUILD_DIR) $(TARGET) $(TEST_CORE) $(VERIFY_LAYERS)
+	rm -rf $(BUILD_DIR) $(TARGET) $(TEST_CORE) $(VERIFY_LAYERS) $(BENCH_GEMM)

@@ -187,7 +187,7 @@ static status_t run_cv2(model_t* model, int d_idx, const char* cv2_branch, int s
     if (st != SUCCESS) return st;
     st = conv_block_forward(s2, s1, w1, b1, p3, true);
     if (st != SUCCESS) return st;
-    return conv2d_forward(out_box, s2, w2, b2, (conv_params_t){1, 0, 1});
+    return conv2d_forward(out_box, s2, w2, b2, (conv_params_t){1, 0, 1}, false);
 }
 
 static status_t run_cv3(model_t* model, int d_idx, const char* cv3_branch, int scale, const tensor_t* feat,
@@ -228,7 +228,7 @@ static status_t run_cv3(model_t* model, int d_idx, const char* cv3_branch, int s
     if (st != SUCCESS) return st;
     st = conv_block_forward(t_pw1, t_dw1, pw10, pb10, (conv_params_t){1, 0, 1}, true);
     if (st != SUCCESS) return st;
-    return conv2d_forward(out_cls, t_pw1, wf, bf, (conv_params_t){1, 0, 1});
+    return conv2d_forward(out_cls, t_pw1, wf, bf, (conv_params_t){1, 0, 1}, false);
 }
 
 static void copy_box_to_concat(const tensor_t* box, int N_total, int offset, float* boxes_dist) {

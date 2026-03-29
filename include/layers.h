@@ -9,9 +9,10 @@ typedef struct {
     int groups;
 } conv_params_t;
 
+/* fuse_silu: if true, apply SiLU in the same pass as bias (after GEMM); no extra silu_forward. */
 status_t conv2d_forward(tensor_t* output, const tensor_t* input, 
                        const tensor_t* weight, const tensor_t* bias, 
-                       conv_params_t params);
+                       conv_params_t params, bool fuse_silu);
 
 status_t silu_forward(tensor_t* tensor);
 

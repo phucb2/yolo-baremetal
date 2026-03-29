@@ -7,4 +7,6 @@ yolo26_bench
 tools/__pycache__/*
 runs/*
 *.bmp
+tests/fixtures/bench_640.png
 .cursor/*.log
+build/*

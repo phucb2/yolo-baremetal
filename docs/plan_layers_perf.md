@@ -28,7 +28,7 @@
 
 1. **Wire optional OpenBLAS** in the Makefile (e.g. `USE_OPENBLAS=1`): include paths, `-lopenblas`, document `OPENBLAS_NUM_THREADS` for repeatability vs throughput.
 2. **Replace or branch `tensor_gemm`** in `src/tensor.c` with `cblas_sgemm` under `CblasRowMajor`, matching current layout: `M = out_c`, `N = H*W`, `K = in_c`, leading dimensions `lda = in_c`, `ldb = H*W`, `ldc = H*W`.
-3. **Verification:** existing `test_tensor_gemm` and all conv-heavy tests; optional micro-bench on a few shapes (tiny vs large `N`) to decide threshold for “always BLAS” vs “fallback scalar” if needed.
+3. **Verification:** existing `test_tensor_gemm` and all conv-heavy tests; optional micro-bench on a few shapes (tiny vs large `N`) to decide threshold for “always BLAS” vs “fallback scalar” if needed. **Run:** `make bench` (`tests/bench_gemm`); compare `USE_OPENBLAS=0` vs `USE_OPENBLAS=1` without `make clean` (separate `tensor_u0.o` / `tensor_u1.o`).
 4. **Bias add after 1×1:** optional follow-up (`cblas_saxpy` per channel or SIMD); likely small next to GEMM.
 
 ## Phase 2 — Attention matmuls via BLAS
@@ -52,6 +52,7 @@
 ## Profiling and acceptance
 
 - Baseline: `yolo26_bench` (same input), optional Instruments / `perf` on `tensor_gemm`, `attention_forward`, `conv2d_forward`.
+- **Commands:** `make bench` — GEMM micro-bench (`tests/bench_gemm`). Full-model timing: `./yolo26_bench --image <png>` (needs `weights/yolo26.bin`).
 - Regression gate: `make verify` (or documented subset), no silent widening of parity without a note in [C_PY_PARITY_REPORT.md](C_PY_PARITY_REPORT.md) if applicable.
 
 ## Open questions

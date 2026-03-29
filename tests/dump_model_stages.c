@@ -8,7 +8,7 @@
  *
  * Build (from repo root, after `make` produces CORE objects):
  *   $(CC) $(CFLAGS) -DNO_LOGGING -Iinclude -Ithird_party tests/dump_model_stages.c \
- *     build/tensor.o build/utils.o build/layers.o build/detection.o build/detect.o build/model.o -o tests/dump_model_stages -lm
+ *     build/tensor_u0.o build/utils.o build/layers.o build/detection.o build/detect.o build/model.o -o tests/dump_model_stages -lm
  */
 
 #define STB_IMAGE_IMPLEMENTATION

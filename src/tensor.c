@@ -2,8 +2,15 @@
 #include <string.h>
 #include "tensor.h"
 
+#ifdef USE_OPENBLAS
+#include <cblas.h>
+#endif
+
 #ifdef __x86_64__
 #include <immintrin.h>
+#endif
+#if defined(__aarch64__)
+#include <arm_neon.h>
 #endif
 
 void* malloc_aligned(size_t size, size_t alignment) {
@@ -61,10 +68,15 @@ status_t tensor_copy(tensor_t* dest, const tensor_t* src) {
     return SUCCESS;
 }
 
-status_t tensor_gemm(float* restrict C, const float* restrict A, const float* restrict B, 
+status_t tensor_gemm(float* restrict C, const float* restrict A, const float* restrict B,
                     int M, int N, int K, float alpha, float beta) {
     if (!C || !A || !B) return ERROR_NULL_POINTER;
 
+#ifdef USE_OPENBLAS
+    /* Row-major: A is M×K, B is K×N, C is M×N (same as conv 1×1: out_c × (H*W)). */
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, M, N, K, alpha, A, K, B, N, beta, C, N);
+    return SUCCESS;
+#else
     for (int i = 0; i < M; i++) {
         float* c_row = &C[i * N];
         if (beta == 0.0f) {
@@ -76,7 +88,7 @@ status_t tensor_gemm(float* restrict C, const float* restrict A, const float* re
         for (int k = 0; k < K; k++) {
             float a_val = A[i * K + k] * alpha;
             if (a_val == 0.0f) continue;
-            
+
             const float* b_row = &B[k * N];
             int j = 0;
 
@@ -103,6 +115,27 @@ status_t tensor_gemm(float* restrict C, const float* restrict A, const float* re
                 __m128 c_vec = _mm_loadu_ps(&c_row[j]);
                 _mm_storeu_ps(&c_row[j], _mm_add_ps(c_vec, _mm_mul_ps(a_vec, b_vec)));
             }
+#elif defined(__aarch64__)
+            float32x4_t a4 = vdupq_n_f32(a_val);
+            for (; j <= N - 16; j += 16) {
+                float32x4_t b0 = vld1q_f32(&b_row[j]);
+                float32x4_t b1 = vld1q_f32(&b_row[j + 4]);
+                float32x4_t b2 = vld1q_f32(&b_row[j + 8]);
+                float32x4_t b3 = vld1q_f32(&b_row[j + 12]);
+                float32x4_t c0 = vld1q_f32(&c_row[j]);
+                float32x4_t c1 = vld1q_f32(&c_row[j + 4]);
+                float32x4_t c2 = vld1q_f32(&c_row[j + 8]);
+                float32x4_t c3 = vld1q_f32(&c_row[j + 12]);
+                vst1q_f32(&c_row[j], vfmaq_f32(c0, a4, b0));
+                vst1q_f32(&c_row[j + 4], vfmaq_f32(c1, a4, b1));
+                vst1q_f32(&c_row[j + 8], vfmaq_f32(c2, a4, b2));
+                vst1q_f32(&c_row[j + 12], vfmaq_f32(c3, a4, b3));
+            }
+            for (; j <= N - 4; j += 4) {
+                float32x4_t bv = vld1q_f32(&b_row[j]);
+                float32x4_t cv = vld1q_f32(&c_row[j]);
+                vst1q_f32(&c_row[j], vfmaq_f32(cv, a4, bv));
+            }
 #endif
             for (; j < N; j++) {
                 c_row[j] += a_val * b_row[j];
@@ -110,4 +143,5 @@ status_t tensor_gemm(float* restrict C, const float* restrict A, const float* re
         }
     }
     return SUCCESS;
+#endif
 }

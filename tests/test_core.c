@@ -72,7 +72,7 @@ static void test_conv1x1_gemm_path(void) {
     bias.data[1] = 1.0f;
     bias.data[2] = 2.0f;
     conv_params_t p = {1, 0, 1};
-    CHECK(conv2d_forward(&out, &in, &w, &bias, p) == SUCCESS, "conv2d 1x1");
+    CHECK(conv2d_forward(&out, &in, &w, &bias, p, false) == SUCCESS, "conv2d 1x1");
     for (int i = 0; i < 12; i++) {
         float want = (i < 4) ? in.data[i] : (i < 8 ? 1.0f : 2.0f);
         CHECK(fabsf(out.data[i] - want) < 1e-5f, "conv2d 1x1 output channel");
@@ -81,6 +81,125 @@ static void test_conv1x1_gemm_path(void) {
     tensor_free(&w);
     tensor_free(&out);
     tensor_free(&bias);
+}
+
+/* Reference conv (same semantics as layers.c conv2d) for k>1 regression. */
+static void naive_conv2d_ref(float* out, const float* in, const float* w, const float* bias_,
+                             int out_c, int in_c, int kh, int kw, int in_h, int in_w, int out_h, int out_w,
+                             int stride, int pad) {
+    for (int oc = 0; oc < out_c; oc++) {
+        for (int oh = 0; oh < out_h; oh++) {
+            for (int ow = 0; ow < out_w; ow++) {
+                float sum = bias_ ? bias_[oc] : 0.0f;
+                for (int ic = 0; ic < in_c; ic++) {
+                    for (int k_h = 0; k_h < kh; k_h++) {
+                        for (int k_w = 0; k_w < kw; k_w++) {
+                            int ih = oh * stride - pad + k_h;
+                            int iw = ow * stride - pad + k_w;
+                            if (ih >= 0 && ih < in_h && iw >= 0 && iw < in_w) {
+                                sum += in[ic * in_h * in_w + ih * in_w + iw] *
+                                       w[oc * in_c * kh * kw + ic * kh * kw + k_h * kw + k_w];
+                            }
+                        }
+                    }
+                }
+                out[oc * out_h * out_w + oh * out_w + ow] = sum;
+            }
+        }
+    }
+}
+
+static void test_conv3x3_im2col_gemm(void) {
+    /* 3x3, same padding, stride 1: 4x4 -> 4x4 */
+    int in_h = 4, in_w = 4, kh = 3, kw = 3;
+    int pad = 1;
+    int out_h = in_h;
+    int out_w = in_w;
+    int in_c = 2, out_c = 3;
+    tensor_t in, w, out, bias;
+    tensor_allocate(&in, 1, in_c, in_h, in_w);
+    tensor_allocate(&w, out_c, in_c, kh, kw);
+    tensor_allocate(&out, 1, out_c, out_h, out_w);
+    tensor_allocate(&bias, out_c, 1, 1, 1);
+    for (int i = 0; i < in_c * in_h * in_w; i++) in.data[i] = (float)(i % 7) * 0.1f - 0.3f;
+    for (int i = 0; i < out_c * in_c * kh * kw; i++) w.data[i] = (float)(i % 5) * 0.07f - 0.1f;
+    for (int i = 0; i < out_c; i++) bias.data[i] = (float)i * 0.02f;
+
+    float* ref = (float*)malloc((size_t)out_c * out_h * out_w * sizeof(float));
+    CHECK(ref != NULL, "conv3x3 ref malloc");
+    conv_params_t p = {1, pad, 1};
+    naive_conv2d_ref(ref, in.data, w.data, bias.data, out_c, in_c, kh, kw, in_h, in_w, out_h, out_w,
+                     p.stride, p.padding);
+    CHECK(conv2d_forward(&out, &in, &w, &bias, p, false) == SUCCESS, "conv2d 3x3 status");
+
+    float max_diff = 0.0f;
+    for (int i = 0; i < out_c * out_h * out_w; i++) {
+        float d = fabsf(out.data[i] - ref[i]);
+        if (d > max_diff) max_diff = d;
+    }
+    CHECK(max_diff < 1e-4f, "conv2d 3x3 im2col+gemm vs naive ref");
+    free(ref);
+    tensor_free(&in);
+    tensor_free(&w);
+    tensor_free(&out);
+    tensor_free(&bias);
+}
+
+static void test_conv_fuse_silu_parity(void) {
+    tensor_t in, w, out_sep, out_fused, bias;
+    tensor_allocate(&in, 1, 2, 3, 3);
+    tensor_allocate(&w, 3, 2, 1, 1);
+    tensor_allocate(&out_sep, 1, 3, 3, 3);
+    tensor_allocate(&out_fused, 1, 3, 3, 3);
+    tensor_allocate(&bias, 3, 1, 1, 1);
+    for (int i = 0; i < 2 * 3 * 3; i++) in.data[i] = (float)(i % 5) * 0.1f - 0.2f;
+    for (int i = 0; i < 3 * 2 * 1 * 1; i++) w.data[i] = (float)(i % 3) * 0.15f - 0.1f;
+    for (int i = 0; i < 3; i++) bias.data[i] = (float)i * 0.01f;
+
+    conv_params_t p = {1, 0, 1};
+    CHECK(conv2d_forward(&out_sep, &in, &w, &bias, p, false) == SUCCESS, "conv2d sep");
+    CHECK(silu_forward(&out_sep) == SUCCESS, "silu sep");
+    CHECK(conv2d_forward(&out_fused, &in, &w, &bias, p, true) == SUCCESS, "conv2d fused silu");
+
+    float max_diff = 0.0f;
+    for (int i = 0; i < 3 * 3 * 3; i++) {
+        float d = fabsf(out_sep.data[i] - out_fused.data[i]);
+        if (d > max_diff) max_diff = d;
+    }
+    CHECK(max_diff < 1e-5f, "fused SiLU parity vs conv + silu");
+
+    tensor_free(&in);
+    tensor_free(&w);
+    tensor_free(&out_sep);
+    tensor_free(&out_fused);
+    tensor_free(&bias);
+
+    /* im2col + GEMM path */
+    tensor_t in2, w2, os, of, b2;
+    tensor_allocate(&in2, 1, 2, 4, 4);
+    tensor_allocate(&w2, 3, 2, 3, 3);
+    tensor_allocate(&os, 1, 3, 4, 4);
+    tensor_allocate(&of, 1, 3, 4, 4);
+    tensor_allocate(&b2, 3, 1, 1, 1);
+    for (int i = 0; i < 2 * 4 * 4; i++) in2.data[i] = (float)(i % 7) * 0.11f - 0.3f;
+    for (int i = 0; i < 3 * 2 * 3 * 3; i++) w2.data[i] = (float)(i % 5) * 0.07f - 0.1f;
+    for (int i = 0; i < 3; i++) b2.data[i] = (float)i * 0.02f;
+    conv_params_t p2 = {1, 1, 1};
+    CHECK(conv2d_forward(&os, &in2, &w2, &b2, p2, false) == SUCCESS, "conv2d 3x3 sep");
+    CHECK(silu_forward(&os) == SUCCESS, "silu 3x3 sep");
+    CHECK(conv2d_forward(&of, &in2, &w2, &b2, p2, true) == SUCCESS, "conv2d 3x3 fused");
+    max_diff = 0.0f;
+    for (int i = 0; i < 3 * 4 * 4; i++) {
+        float d = fabsf(os.data[i] - of.data[i]);
+        if (d > max_diff) max_diff = d;
+    }
+    CHECK(max_diff < 1e-4f, "fused SiLU parity 3x3 im2col");
+
+    tensor_free(&in2);
+    tensor_free(&w2);
+    tensor_free(&os);
+    tensor_free(&of);
+    tensor_free(&b2);
 }
 
 static void test_fold_bn(void) {
@@ -514,6 +633,8 @@ int main(void) {
     test_tensor_gemm();
     test_silu();
     test_conv1x1_gemm_path();
+    test_conv3x3_im2col_gemm();
+    test_conv_fuse_silu_parity();
     test_fold_bn();
     test_fold_bn_nested_names_load();
     test_model_load_minimal();

@@ -1,11 +1,69 @@
 #ifdef __AVX2__
 #include <immintrin.h>
 #endif
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 #include <math.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include <float.h>
 #include "layers.h"
+
+/* Add per-channel bias to a contiguous H*W plane. */
+static void conv_bias_add_plane(float* plane, int len, float bias) {
+    int i = 0;
+#ifdef __AVX2__
+    __m256 bv = _mm256_set1_ps(bias);
+    for (; i <= len - 8; i += 8) {
+        __m256 v = _mm256_loadu_ps(plane + i);
+        _mm256_storeu_ps(plane + i, _mm256_add_ps(v, bv));
+    }
+#elif defined(__aarch64__)
+    float32x4_t bv = vdupq_n_f32(bias);
+    for (; i <= len - 4; i += 4) {
+        float32x4_t v = vld1q_f32(plane + i);
+        vst1q_f32(plane + i, vaddq_f32(v, bv));
+    }
+#endif
+    for (; i < len; i++) plane[i] += bias;
+}
+
+static void silu_apply_plane(float* p, int len) {
+    for (int i = 0; i < len; i++) {
+        float x = p[i];
+        p[i] = x / (1.0f + expf(-x));
+    }
+}
+
+static void conv_bias_and_silu_plane(float* p, int len, float bias) {
+    for (int i = 0; i < len; i++) {
+        float x = p[i] + bias;
+        p[i] = x / (1.0f + expf(-x));
+    }
+}
+
+/* After conv output is in `base`: optional bias, optional fused SiLU (single pass vs bias then silu). */
+static void conv2d_finish_output(float* base, int out_c, int plane, const tensor_t* bias, bool fuse_silu) {
+    if (fuse_silu) {
+        if (bias) {
+            for (int oc = 0; oc < out_c; oc++) {
+                conv_bias_and_silu_plane(base + oc * plane, plane, bias->data[oc]);
+            }
+        } else {
+            for (int oc = 0; oc < out_c; oc++) {
+                silu_apply_plane(base + oc * plane, plane);
+            }
+        }
+    } else {
+        if (bias) {
+            for (int oc = 0; oc < out_c; oc++) {
+                conv_bias_add_plane(base + oc * plane, plane, bias->data[oc]);
+            }
+        }
+    }
+}
 
 status_t silu_forward(tensor_t* tensor) {
     if (!tensor || !tensor->data) return ERROR_NULL_POINTER;
@@ -40,53 +98,58 @@ status_t upsample_nearest_forward(tensor_t* output, const tensor_t* input, int s
 
 status_t conv2d_forward(tensor_t* output, const tensor_t* input, 
                        const tensor_t* weight, const tensor_t* bias, 
-                       conv_params_t params) {
+                       conv_params_t params, bool fuse_silu) {
     if (!output || !input || !weight) return ERROR_NULL_POINTER;
     int out_c = weight->dims[0], in_c = weight->dims[1], kh = weight->dims[2], kw = weight->dims[3];
     int in_h = input->dims[2], in_w = input->dims[3], out_h = output->dims[2], out_w = output->dims[3];
+    int plane = out_h * out_w;
 
     if (kh == 1 && kw == 1 && params.stride == 1 && params.padding == 0) {
         tensor_gemm(output->data, weight->data, input->data, out_c, in_h * in_w, in_c, 1.0f, 0.0f);
-        if (bias) {
-            for (int oc = 0; oc < out_c; oc++) {
-                float b = bias->data[oc];
-                float* out_ptr = output->data + oc * out_h * out_w;
-                for (int i = 0; i < out_h * out_w; i++) out_ptr[i] += b;
-            }
-        }
+        conv2d_finish_output(output->data, out_c, plane, bias, fuse_silu);
         return SUCCESS;
     }
 
-    for (int oc = 0; oc < out_c; oc++) {
-        for (int oh = 0; oh < out_h; oh++) {
-            for (int ow = 0; ow < out_w; ow++) {
-                float sum = bias ? bias->data[oc] : 0.0f;
-                for (int ic = 0; ic < in_c; ic++) {
-                    for (int k_h = 0; k_h < kh; k_h++) {
-                        for (int k_w = 0; k_w < kw; k_w++) {
-                            int ih = oh * params.stride - params.padding + k_h;
-                            int iw = ow * params.stride - params.padding + k_w;
-                            if (ih >= 0 && ih < in_h && iw >= 0 && iw < in_w) {
-                                sum += input->data[ic * in_h * in_w + ih * in_w + iw] * 
-                                       weight->data[oc * in_c * kh * kw + ic * kh * kw + k_h * kw + k_w];
-                            }
-                        }
-                    }
-                }
-                output->data[oc * out_h * out_w + oh * out_w + ow] = sum;
+    /* K = in_c*kh*kw patch rows; N = out_h*out_w columns (same layout as weight rows for GEMM). */
+    int k_patch = in_c * kh * kw;
+    int n_spatial = out_h * out_w;
+    size_t col_elems = (size_t)k_patch * (size_t)n_spatial;
+    float* col = (float*)malloc(col_elems * sizeof(float));
+    if (!col) return ERROR_OUT_OF_MEMORY;
+
+    const float* in_plane = input->data;
+    const int patch_plane = kh * kw;
+    /* Row-major B rows: contiguous writes for GEMM's B[k,:] reads. */
+    for (int j = 0; j < k_patch; j++) {
+        int ic = j / patch_plane;
+        int rem = j % patch_plane;
+        int k_h = rem / kw;
+        int k_w = rem % kw;
+        float* row = col + (size_t)j * (size_t)n_spatial;
+        for (int n = 0; n < n_spatial; n++) {
+            int oh = n / out_w;
+            int ow = n % out_w;
+            int ih = oh * params.stride - params.padding + k_h;
+            int iw = ow * params.stride - params.padding + k_w;
+            float v = 0.0f;
+            if (ih >= 0 && ih < in_h && iw >= 0 && iw < in_w) {
+                v = in_plane[ic * in_h * in_w + ih * in_w + iw];
             }
+            row[n] = v;
         }
     }
+
+    tensor_gemm(output->data, weight->data, col, out_c, n_spatial, k_patch, 1.0f, 0.0f);
+    free(col);
+
+    conv2d_finish_output(output->data, out_c, plane, bias, fuse_silu);
     return SUCCESS;
 }
 
 status_t conv_block_forward(tensor_t* output, const tensor_t* input, 
                            const tensor_t* weight, const tensor_t* bias,
                            conv_params_t params, bool act) {
-    status_t status = conv2d_forward(output, input, weight, bias, params);
-    if (status != SUCCESS) return status;
-    if (act) status = silu_forward(output);
-    return status;
+    return conv2d_forward(output, input, weight, bias, params, act);
 }
 
 status_t bottleneck_forward(tensor_t* output, const tensor_t* input,

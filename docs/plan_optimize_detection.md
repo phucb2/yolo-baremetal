@@ -69,3 +69,10 @@ Hot spots tend to be **many convs** (same kernels as backbone) plus **allocation
 - [`include/detect.h`](../include/detect.h)
 - [`src/detection.c`](../src/detection.c) — `decode_detections` (consumer of head output)
 - [`docs/plan_layers_perf.md`](plan_layers_perf.md) — GEMM, DW conv, SiLU
+
+## Evaluation (COCO8 parity)
+
+- Build + evaluate both backends on Ultralytics COCO8:
+  - `make eval-coco8 PT_MODEL=weights/yolo26n.pt C_WEIGHTS=weights/yolo26.bin`
+- The evaluator uses the same 640x640 stretch preprocessing for PyTorch and C, then rescales detections back to original image size before COCO mAP.
+- Script: [`tools/eval_coco8.py`](../tools/eval_coco8.py)

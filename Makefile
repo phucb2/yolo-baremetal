@@ -58,6 +58,9 @@ CORE_OBJ = $(TENSOR_OBJ) $(BUILD_DIR)/utils.o $(BUILD_DIR)/layers.o $(BUILD_DIR)
 TEST_CORE = tests/test_core
 VERIFY_LAYERS = tests/verify_layers
 BENCH_GEMM = tests/bench_gemm
+PT_MODEL ?= weights/yolo26n.pt
+C_WEIGHTS ?= weights/yolo26.bin
+PYTHON_EVAL ?= uv run python
 
 $(TARGET): $(OBJ)
 	$(CC) $(OBJ) -o $(TARGET) $(LDFLAGS) $(BLAS_LDFLAGS)
@@ -85,6 +88,10 @@ $(BENCH_GEMM): tests/bench_gemm.c $(TENSOR_OBJ) $(BUILD_DIR)/utils.o | $(BUILD_D
 .PHONY: bench
 bench: $(BENCH_GEMM)
 	./$(BENCH_GEMM)
+
+.PHONY: eval-coco8
+eval-coco8: $(TARGET)
+	$(PYTHON_EVAL) tools/eval_coco8.py --pt "$(PT_MODEL)" --c-bin "./$(TARGET)" --c-weights "$(C_WEIGHTS)"
 
 regenerate-golden:
 	bash tools/with_py39.sh python tools/generate_layer_tests.py

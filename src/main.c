@@ -15,6 +15,46 @@
 #include "utils.h"
 #include "visualize.h"
 
+static void write_detections_json(const char* json_path,
+                                  const char* image_path,
+                                  int orig_w,
+                                  int orig_h,
+                                  int resized_w,
+                                  int resized_h,
+                                  float conf_threshold,
+                                  const detection_results_t* results) {
+    if (!json_path || !results) {
+        return;
+    }
+    FILE* f = fopen(json_path, "wb");
+    if (!f) {
+        fprintf(stderr, "Failed to open json output: %s\n", json_path);
+        return;
+    }
+
+    fprintf(f, "{\n");
+    fprintf(f, "  \"image_path\": \"%s\",\n", image_path ? image_path : "");
+    fprintf(f, "  \"orig_w\": %d,\n", orig_w);
+    fprintf(f, "  \"orig_h\": %d,\n", orig_h);
+    fprintf(f, "  \"resized_w\": %d,\n", resized_w);
+    fprintf(f, "  \"resized_h\": %d,\n", resized_h);
+    fprintf(f, "  \"conf_threshold\": %.8g,\n", conf_threshold);
+    fprintf(f, "  \"detections\": [\n");
+
+    for (int i = 0; i < results->count; i++) {
+        const detection_t* det = &results->detections[i];
+        fprintf(f,
+                "    {\"x1\": %.8g, \"y1\": %.8g, \"x2\": %.8g, \"y2\": %.8g, \"score\": %.8g, "
+                "\"class_id\": %d}%s\n",
+                det->x1, det->y1, det->x2, det->y2, det->score, det->class_id,
+                (i + 1 < results->count) ? "," : "");
+    }
+
+    fprintf(f, "  ]\n");
+    fprintf(f, "}\n");
+    fclose(f);
+}
+
 static void resize_rgb_bilinear(const uint8_t* src, int sw, int sh, uint8_t* dst, int dw, int dh) {
     if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) {
         return;
@@ -63,10 +103,17 @@ void preprocess(tensor_t* input_tensor, const uint8_t* rgb_buffer, int w, int h)
     }
 }
 
-static int run_image_mode(const char* img_path, const char* out_bmp, int W, int H, int layer_profile) {
+static int run_image_mode(const char* img_path,
+                          const char* out_bmp,
+                          const char* json_path,
+                          const char* weights_path,
+                          float conf_threshold,
+                          int W,
+                          int H,
+                          int layer_profile) {
     model_t model;
     model_create(&model, W, H);
-    if (model_load_weights(&model, "weights/yolo26.bin") != SUCCESS) {
+    if (model_load_weights(&model, weights_path) != SUCCESS) {
         printf("Failed to load weights\n");
         model_destroy(&model);
         return 1;
@@ -139,7 +186,7 @@ static int run_image_mode(const char* img_path, const char* out_bmp, int W, int 
 
     timer_t t_dec;
     timer_start(&t_dec);
-    decode_detections(&results, &head_output, 0.2f);
+    decode_detections(&results, &head_output, conf_threshold);
     timer_stop(&t_dec);
     double ms_dec = timer_elapsed_ms(&t_dec);
 
@@ -168,6 +215,10 @@ static int run_image_mode(const char* img_path, const char* out_bmp, int W, int 
                det->x1, det->y1, det->x2, det->y2);
     }
 
+    if (json_path) {
+        write_detections_json(json_path, img_path, iw, ih, W, H, conf_threshold, &results);
+    }
+
     free(rgb_buffer);
     tensor_free(&input_tensor);
     tensor_free(&head_output);
@@ -181,29 +232,84 @@ int main(int argc, char** argv) {
 
     if (argc >= 2 && strcmp(argv[1], "--image") == 0) {
         if (argc < 3) {
-            fprintf(stderr, "usage: %s --image <path> [annotated.bmp] [--no-layer-profile]\n", argv[0]);
+            fprintf(stderr,
+                    "usage: %s --image <path> [annotated.bmp] [--json out.json] [--conf thr] [--weights w.bin] "
+                    "[--no-layer-profile]\n",
+                    argv[0]);
             return 1;
         }
         const char* out_bmp = NULL;
+        const char* json_path = NULL;
+        const char* weights_path = "weights/yolo26.bin";
+        float conf_threshold = 0.2f;
         int layer_profile = 1;
         for (int a = 3; a < argc; a++) {
             if (strcmp(argv[a], "--no-layer-profile") == 0) {
                 layer_profile = 0;
+            } else if (strcmp(argv[a], "--json") == 0) {
+                if (a + 1 >= argc) {
+                    fprintf(stderr, "--json requires a path\n");
+                    return 1;
+                }
+                json_path = argv[++a];
+            } else if (strcmp(argv[a], "--weights") == 0) {
+                if (a + 1 >= argc) {
+                    fprintf(stderr, "--weights requires a path\n");
+                    return 1;
+                }
+                weights_path = argv[++a];
+            } else if (strcmp(argv[a], "--conf") == 0) {
+                if (a + 1 >= argc) {
+                    fprintf(stderr, "--conf requires a float\n");
+                    return 1;
+                }
+                conf_threshold = (float)atof(argv[++a]);
             } else if (!out_bmp && argv[a][0] != '-') {
                 out_bmp = argv[a];
             } else {
-                fprintf(stderr, "usage: %s --image <path> [annotated.bmp] [--no-layer-profile]\n", argv[0]);
+                fprintf(stderr,
+                        "usage: %s --image <path> [annotated.bmp] [--json out.json] [--conf thr] [--weights w.bin] "
+                        "[--no-layer-profile]\n",
+                        argv[0]);
                 return 1;
             }
         }
-        return run_image_mode(argv[2], out_bmp, W, H, layer_profile);
+        return run_image_mode(argv[2], out_bmp, json_path, weights_path, conf_threshold, W, H, layer_profile);
+    }
+
+    const char* weights_path = "weights/yolo26.bin";
+    float conf_threshold = 0.2f;
+    const char* bmp_path = NULL;
+    int layer_profile = 1;
+    for (int a = 1; a < argc; a++) {
+        if (strcmp(argv[a], "--no-layer-profile") == 0) {
+            layer_profile = 0;
+        } else if (strcmp(argv[a], "--weights") == 0) {
+            if (a + 1 >= argc) {
+                fprintf(stderr, "--weights requires a path\n");
+                return 1;
+            }
+            weights_path = argv[++a];
+        } else if (strcmp(argv[a], "--conf") == 0) {
+            if (a + 1 >= argc) {
+                fprintf(stderr, "--conf requires a float\n");
+                return 1;
+            }
+            conf_threshold = (float)atof(argv[++a]);
+        } else if (!bmp_path && argv[a][0] != '-') {
+            bmp_path = argv[a];
+        } else {
+            fprintf(stderr, "usage: %s [--no-layer-profile] [--weights w.bin] [--conf thr] [annotated.bmp]\n",
+                    argv[0]);
+            return 1;
+        }
     }
 
     model_t model;
     model_create(&model, W, H);
-    
-    if (model_load_weights(&model, "weights/yolo26.bin") != SUCCESS) {
+    if (model_load_weights(&model, weights_path) != SUCCESS) {
         printf("Failed to load weights\n");
+        model_destroy(&model);
         return 1;
     }
     
@@ -228,18 +334,6 @@ int main(int argc, char** argv) {
     results.detections = malloc(sizeof(detection_t) * results.capacity);
     
     printf("Starting inference loop. Press Ctrl+C to stop.\n");
-    const char* bmp_path = NULL;
-    int layer_profile = 1;
-    for (int a = 1; a < argc; a++) {
-        if (strcmp(argv[a], "--no-layer-profile") == 0) {
-            layer_profile = 0;
-        } else if (!bmp_path && argv[a][0] != '-') {
-            bmp_path = argv[a];
-        } else {
-            fprintf(stderr, "usage: %s [--no-layer-profile] [annotated.bmp]\n", argv[0]);
-            return 1;
-        }
-    }
     const int save_bmp = bmp_path != NULL;
     if (save_bmp) {
         printf("Saving annotated frames to %s (last frame wins).\n", bmp_path);
@@ -289,7 +383,7 @@ int main(int argc, char** argv) {
 
         timer_t t_dec;
         timer_start(&t_dec);
-        decode_detections(&results, &head_output, 0.2f);
+        decode_detections(&results, &head_output, conf_threshold);
         timer_stop(&t_dec);
         double ms_dec = timer_elapsed_ms(&t_dec);
 

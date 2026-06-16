@@ -10,3 +10,5 @@ runs/*
 tests/fixtures/bench_640.png
 .cursor/*.log
 build/*
+
+datasets/*

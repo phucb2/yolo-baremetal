@@ -37,6 +37,10 @@ typedef struct {
     
     int input_w, input_h;
     int num_classes;
+
+    /* P3/P4/P5 anchor grid (ax, ay, stride), 3×N floats; filled at model_create for fixed letterbox size. */
+    float* detect_anchor_block;
+    int detect_anchor_N;
 } model_t;
 
 status_t model_create(model_t* model, int input_w, int input_h);

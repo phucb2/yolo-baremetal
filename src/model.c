@@ -13,6 +13,8 @@ status_t model_create(model_t* model, int input_w, int input_h) {
     model->weights = NULL;
     model->num_weights = 0;
     model->num_classes = 80;
+    model->detect_anchor_block = NULL;
+    model->detect_anchor_N = 0;
     
     // Allocate 24 buffers for the 24 layers defined in yolo26.yaml
     model->num_buffers = 24;
@@ -56,7 +58,18 @@ status_t model_create(model_t* model, int input_w, int input_h) {
     
     /* Final detections buffer: Ultralytics Detect.postprocess (reg_max=1) -> [1, max_det, 6] xyxy, score, class */
     tensor_allocate(&model->buffers[23], 1, 300, 6, 1);
-    
+
+    {
+        int n_anchors = detect_anchor_count_for_input(input_w, input_h);
+        model->detect_anchor_block = (float*)malloc((size_t)3 * (size_t)n_anchors * sizeof(float));
+        if (!model->detect_anchor_block) {
+            model_destroy(model);
+            return ERROR_OUT_OF_MEMORY;
+        }
+        detect_write_anchors_to_block(input_w, input_h, model->detect_anchor_block);
+        model->detect_anchor_N = n_anchors;
+    }
+
     return SUCCESS;
 }
 
@@ -66,6 +79,9 @@ status_t model_destroy(model_t* model) {
     free(model->weights);
     for (int i = 0; i < model->num_buffers; i++) tensor_free(&model->buffers[i]);
     free(model->buffers);
+    free(model->detect_anchor_block);
+    model->detect_anchor_block = NULL;
+    model->detect_anchor_N = 0;
     return SUCCESS;
 }
 

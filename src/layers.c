@@ -1,4 +1,4 @@
-#ifdef __AVX2__
+#if defined(__AVX2__) || defined(__SSE2__)
 #include <immintrin.h>
 #endif
 #if defined(__aarch64__)
@@ -329,27 +329,178 @@ status_t sppf_forward(tensor_t* output, const tensor_t* input,
 
 /* --- C2PSA: depthwise 3x3 (pe), Attention, PSABlock, C2PSA (Ultralytics) --- */
 
-status_t dwconv3x3_same_forward(tensor_t* out, const tensor_t* in, const tensor_t* w, const tensor_t* bias) {
-    if (!out || !in || !w) return ERROR_NULL_POINTER;
-    int c = in->dims[1], h = in->dims[2], wi = in->dims[3];
-    int pad = 1;
-    for (int ci = 0; ci < c; ci++) {
+static inline float silu_f(float x) {
+    return x / (1.0f + expf(-x));
+}
+
+/* One output pixel: pad-1 same conv; w9 is row-major 3×3. */
+static inline float dwconv3x3_pixel_sum(const float* in_plane, int h, int wi, const float* w9, float b, int oh,
+                                        int ow) {
+    float s = b;
+    for (int kh = 0; kh < 3; kh++) {
+        for (int kw = 0; kw < 3; kw++) {
+            int ih = oh - 1 + kh, iw = ow - 1 + kw;
+            if (ih >= 0 && ih < h && iw >= 0 && iw < wi) s += in_plane[ih * wi + iw] * w9[kh * 3 + kw];
+        }
+    }
+    return s;
+}
+
+/* Interior pixels only: 3×3 window fully inside — scalar fallback (non-SIMD targets). */
+__attribute__((unused)) static inline float dwconv3x3_center9(const float* p_tl, int wi, const float* w9, float b) {
+    return b + w9[0] * p_tl[0] + w9[1] * p_tl[1] + w9[2] * p_tl[2] + w9[3] * p_tl[wi] + w9[4] * p_tl[wi + 1] +
+           w9[5] * p_tl[wi + 2] + w9[6] * p_tl[2 * wi] + w9[7] * p_tl[2 * wi + 1] + w9[8] * p_tl[2 * wi + 2];
+}
+
+#if defined(__aarch64__)
+static inline float dwconv3x3_center9_neon(const float* p_tl, int wi, float32x4_t wv0, float32x4_t wv1,
+                                           float32x4_t wv2, float b) {
+    float32x4_t p0 = vsetq_lane_f32(0.f, vld1q_f32(p_tl), 3);
+    float32x4_t p1 = vsetq_lane_f32(0.f, vld1q_f32(p_tl + wi), 3);
+    float32x4_t p2 = vsetq_lane_f32(0.f, vld1q_f32(p_tl + 2 * wi), 3);
+    float32x4_t m0 = vmulq_f32(wv0, p0);
+    float32x4_t m1 = vmulq_f32(wv1, p1);
+    float32x4_t m2 = vmulq_f32(wv2, p2);
+    return b + vaddvq_f32(m0) + vaddvq_f32(m1) + vaddvq_f32(m2);
+}
+#endif
+
+#if defined(__SSE2__)
+/* Sum lower 3 lanes (lane 3 is zero). */
+static inline float sse_hsum3(__m128 v) {
+    float t[4];
+    _mm_storeu_ps(t, v);
+    return t[0] + t[1] + t[2];
+}
+
+static inline float dwconv3x3_center9_sse(const float* p_tl, int wi, __m128 wv0, __m128 wv1, __m128 wv2, float b) {
+    __m128 p0 = _mm_set_ps(0.f, p_tl[2], p_tl[1], p_tl[0]);
+    __m128 p1 = _mm_set_ps(0.f, p_tl[wi + 2], p_tl[wi + 1], p_tl[wi]);
+    __m128 p2 = _mm_set_ps(0.f, p_tl[2 * wi + 2], p_tl[2 * wi + 1], p_tl[2 * wi]);
+    __m128 m0 = _mm_mul_ps(wv0, p0);
+    __m128 m1 = _mm_mul_ps(wv1, p1);
+    __m128 m2 = _mm_mul_ps(wv2, p2);
+    return b + sse_hsum3(m0) + sse_hsum3(m1) + sse_hsum3(m2);
+}
+#endif
+
+/* Direct DW 3×3 (no im2col / malloc). Border uses scalar checks; center uses fused 9-tap MAC. */
+static void dwconv3x3_same_plane_direct(const float* in_plane, int h, int wi, const float* w9, float b, float* out_plane,
+                                      int fuse_silu) {
+    if (h < 3 || wi < 3) {
         for (int oh = 0; oh < h; oh++) {
             for (int ow = 0; ow < wi; ow++) {
-                float s = bias ? bias->data[ci] : 0.0f;
-                for (int kh = 0; kh < 3; kh++) {
-                    for (int kw = 0; kw < 3; kw++) {
-                        int ih = oh - pad + kh, iw = ow - pad + kw;
-                        if (ih >= 0 && ih < h && iw >= 0 && iw < wi) {
-                            s += in->data[ci * h * wi + ih * wi + iw] * w->data[ci * 9 + kh * 3 + kw];
-                        }
-                    }
-                }
-                out->data[ci * h * wi + oh * wi + ow] = s;
+                float s = dwconv3x3_pixel_sum(in_plane, h, wi, w9, b, oh, ow);
+                out_plane[oh * wi + ow] = fuse_silu ? silu_f(s) : s;
+            }
+        }
+        return;
+    }
+
+    /* Top row */
+    for (int ow = 0; ow < wi; ow++) {
+        float s = dwconv3x3_pixel_sum(in_plane, h, wi, w9, b, 0, ow);
+        out_plane[ow] = fuse_silu ? silu_f(s) : s;
+    }
+    /* Bottom row */
+    {
+        int oh = h - 1;
+        for (int ow = 0; ow < wi; ow++) {
+            float s = dwconv3x3_pixel_sum(in_plane, h, wi, w9, b, oh, ow);
+            out_plane[oh * wi + ow] = fuse_silu ? silu_f(s) : s;
+        }
+    }
+
+    /* Middle rows — pack 3×3 weights once per plane (SIMD; avoids OOB load past w9[8]). */
+#if defined(__aarch64__)
+    float32x4_t wv_neon0, wv_neon1, wv_neon2;
+    {
+        float wr[12];
+        wr[0] = w9[0];
+        wr[1] = w9[1];
+        wr[2] = w9[2];
+        wr[3] = 0.f;
+        wr[4] = w9[3];
+        wr[5] = w9[4];
+        wr[6] = w9[5];
+        wr[7] = 0.f;
+        wr[8] = w9[6];
+        wr[9] = w9[7];
+        wr[10] = w9[8];
+        wr[11] = 0.f;
+        wv_neon0 = vld1q_f32(wr);
+        wv_neon1 = vld1q_f32(wr + 4);
+        wv_neon2 = vld1q_f32(wr + 8);
+    }
+#elif defined(__SSE2__)
+    __m128 wv_sse0 = _mm_set_ps(0.f, w9[2], w9[1], w9[0]);
+    __m128 wv_sse1 = _mm_set_ps(0.f, w9[5], w9[4], w9[3]);
+    __m128 wv_sse2 = _mm_set_ps(0.f, w9[8], w9[7], w9[6]);
+#endif
+
+    for (int oh = 1; oh <= h - 2; oh++) {
+        float* out_row = out_plane + oh * wi;
+        /* Left edge */
+        {
+            float s = dwconv3x3_pixel_sum(in_plane, h, wi, w9, b, oh, 0);
+            out_row[0] = fuse_silu ? silu_f(s) : s;
+        }
+        /* Right edge */
+        {
+            float s = dwconv3x3_pixel_sum(in_plane, h, wi, w9, b, oh, wi - 1);
+            out_row[wi - 1] = fuse_silu ? silu_f(s) : s;
+        }
+        /* Center block: SIMD 3×3 MAC (border handled above). */
+        if (fuse_silu) {
+            for (int ow = 1; ow <= wi - 2; ow++) {
+                const float* p = in_plane + (oh - 1) * wi + (ow - 1);
+#if defined(__aarch64__)
+                float s = dwconv3x3_center9_neon(p, wi, wv_neon0, wv_neon1, wv_neon2, b);
+#elif defined(__SSE2__)
+                float s = dwconv3x3_center9_sse(p, wi, wv_sse0, wv_sse1, wv_sse2, b);
+#else
+                float s = dwconv3x3_center9(p, wi, w9, b);
+#endif
+                out_row[ow] = silu_f(s);
+            }
+        } else {
+            for (int ow = 1; ow <= wi - 2; ow++) {
+                const float* p = in_plane + (oh - 1) * wi + (ow - 1);
+#if defined(__aarch64__)
+                out_row[ow] = dwconv3x3_center9_neon(p, wi, wv_neon0, wv_neon1, wv_neon2, b);
+#elif defined(__SSE2__)
+                out_row[ow] = dwconv3x3_center9_sse(p, wi, wv_sse0, wv_sse1, wv_sse2, b);
+#else
+                out_row[ow] = dwconv3x3_center9(p, wi, w9, b);
+#endif
             }
         }
     }
+}
+
+static status_t dwconv3x3_same_direct(tensor_t* out, const tensor_t* in, const tensor_t* w, const tensor_t* bias,
+                                      int fuse_silu) {
+    if (!out || !in || !w) return ERROR_NULL_POINTER;
+    int c = in->dims[1], h = in->dims[2], wi = in->dims[3];
+    int n_spatial = h * wi;
+
+    for (int ci = 0; ci < c; ci++) {
+        const float* in_plane = in->data + (size_t)ci * (size_t)n_spatial;
+        const float* w9 = w->data + (size_t)ci * 9u;
+        float b = bias ? bias->data[ci] : 0.0f;
+        float* out_plane = out->data + (size_t)ci * (size_t)n_spatial;
+        dwconv3x3_same_plane_direct(in_plane, h, wi, w9, b, out_plane, fuse_silu);
+    }
     return SUCCESS;
+}
+
+status_t dwconv3x3_same_forward(tensor_t* out, const tensor_t* in, const tensor_t* w, const tensor_t* bias) {
+    return dwconv3x3_same_direct(out, in, w, bias, 0);
+}
+
+status_t dwconv3x3_same_forward_fuse_silu(tensor_t* out, const tensor_t* in, const tensor_t* w,
+                                            const tensor_t* bias) {
+    return dwconv3x3_same_direct(out, in, w, bias, 1);
 }
 
 static void softmax_rows_nn(float* attn, int N) {

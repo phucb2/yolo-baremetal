@@ -30,14 +30,26 @@ ifeq ($(UNAME_M),x86_64)
 	CFLAGS += -mavx2 -mfma -march=native
 endif
 
-# OpenBLAS: USE_OPENBLAS=1. Default OPENBLAS_PREFIX is Apple Silicon Homebrew; Intel Mac: OPENBLAS_PREFIX=/usr/local/opt/openblas
+# OpenBLAS: USE_OPENBLAS=1. Set OPENBLAS_PREFIX if headers/libs are not found (e.g. brew install openblas).
+# Prefix: try `brew --prefix openblas`, then arm64 / Intel Homebrew defaults.
 USE_OPENBLAS ?= 0
 TENSOR_OBJ = $(BUILD_DIR)/tensor_u$(USE_OPENBLAS).o
 BLAS_LDFLAGS :=
 ifeq ($(USE_OPENBLAS),1)
 	CFLAGS += -DUSE_OPENBLAS
-	OPENBLAS_PREFIX ?= /opt/homebrew/opt/openblas
+	OPENBLAS_PREFIX ?= $(shell brew --prefix openblas 2>/dev/null)
+	ifeq ($(OPENBLAS_PREFIX),)
+		ifeq ($(UNAME_M),arm64)
+			OPENBLAS_PREFIX := /opt/homebrew/opt/openblas
+		else
+			OPENBLAS_PREFIX := /usr/local/opt/openblas
+		endif
+	endif
 	CFLAGS += -I$(OPENBLAS_PREFIX)/include
+	# Some Homebrew layouts only expose cblas.h here:
+	ifneq ($(wildcard $(OPENBLAS_PREFIX)/include/openblas),)
+		CFLAGS += -I$(OPENBLAS_PREFIX)/include/openblas
+	endif
 	BLAS_LDFLAGS := -L$(OPENBLAS_PREFIX)/lib -lopenblas
 endif
 

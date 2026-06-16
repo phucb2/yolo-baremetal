@@ -63,7 +63,7 @@ void preprocess(tensor_t* input_tensor, const uint8_t* rgb_buffer, int w, int h)
     }
 }
 
-static int run_image_mode(const char* img_path, const char* out_bmp, int W, int H) {
+static int run_image_mode(const char* img_path, const char* out_bmp, int W, int H, int layer_profile) {
     model_t model;
     model_create(&model, W, H);
     if (model_load_weights(&model, "weights/yolo26.bin") != SUCCESS) {
@@ -111,11 +111,14 @@ static int run_image_mode(const char* img_path, const char* out_bmp, int W, int 
     preprocess(&input_tensor, rgb_buffer, W, H);
 
     model_forward_profile_t layer_prof;
-    model_forward_profile_reset(&layer_prof);
+    if (layer_profile) {
+        model_forward_profile_reset(&layer_prof);
+    }
 
     timer_t t_inf;
     timer_start(&t_inf);
-    status_t inf_st = model_forward_ex(&model, &input_tensor, &head_output, NULL, &layer_prof);
+    status_t inf_st =
+        model_forward_ex(&model, &input_tensor, &head_output, NULL, layer_profile ? &layer_prof : NULL);
     timer_stop(&t_inf);
     double ms_inf = timer_elapsed_ms(&t_inf);
 
@@ -129,8 +132,10 @@ static int run_image_mode(const char* img_path, const char* out_bmp, int W, int 
         return 1;
     }
 
-    model_forward_profile_print_last(&layer_prof, stdout, "  model_forward steps, ms:");
-    model_forward_profile_print_aggregate(&layer_prof, stdout);
+    if (layer_profile) {
+        model_forward_profile_print_last(&layer_prof, stdout, "  model_forward steps, ms:");
+        model_forward_profile_print_aggregate(&layer_prof, stdout);
+    }
 
     timer_t t_dec;
     timer_start(&t_dec);
@@ -176,15 +181,22 @@ int main(int argc, char** argv) {
 
     if (argc >= 2 && strcmp(argv[1], "--image") == 0) {
         if (argc < 3) {
-            fprintf(stderr, "usage: %s --image <path> [annotated.bmp]\n", argv[0]);
+            fprintf(stderr, "usage: %s --image <path> [annotated.bmp] [--no-layer-profile]\n", argv[0]);
             return 1;
         }
-        if (argc > 4) {
-            fprintf(stderr, "usage: %s --image <path> [annotated.bmp]\n", argv[0]);
-            return 1;
+        const char* out_bmp = NULL;
+        int layer_profile = 1;
+        for (int a = 3; a < argc; a++) {
+            if (strcmp(argv[a], "--no-layer-profile") == 0) {
+                layer_profile = 0;
+            } else if (!out_bmp && argv[a][0] != '-') {
+                out_bmp = argv[a];
+            } else {
+                fprintf(stderr, "usage: %s --image <path> [annotated.bmp] [--no-layer-profile]\n", argv[0]);
+                return 1;
+            }
         }
-        const char* out_bmp = (argc >= 4) ? argv[3] : NULL;
-        return run_image_mode(argv[2], out_bmp, W, H);
+        return run_image_mode(argv[2], out_bmp, W, H, layer_profile);
     }
 
     model_t model;
@@ -216,14 +228,28 @@ int main(int argc, char** argv) {
     results.detections = malloc(sizeof(detection_t) * results.capacity);
     
     printf("Starting inference loop. Press Ctrl+C to stop.\n");
-    const int save_bmp = argc >= 2;
+    const char* bmp_path = NULL;
+    int layer_profile = 1;
+    for (int a = 1; a < argc; a++) {
+        if (strcmp(argv[a], "--no-layer-profile") == 0) {
+            layer_profile = 0;
+        } else if (!bmp_path && argv[a][0] != '-') {
+            bmp_path = argv[a];
+        } else {
+            fprintf(stderr, "usage: %s [--no-layer-profile] [annotated.bmp]\n", argv[0]);
+            return 1;
+        }
+    }
+    const int save_bmp = bmp_path != NULL;
     if (save_bmp) {
-        printf("Saving annotated frames to %s (last frame wins).\n", argv[1]);
+        printf("Saving annotated frames to %s (last frame wins).\n", bmp_path);
     }
 
-    const int frames_total = 5;
+    const int frames_total = 10;
     model_forward_profile_t layer_prof;
-    model_forward_profile_reset(&layer_prof);
+    if (layer_profile) {
+        model_forward_profile_reset(&layer_prof);
+    }
 
     for (int i = 0; i < frames_total; i++) {
         printf("\n--- Frame %d ---\n", i);
@@ -242,7 +268,8 @@ int main(int argc, char** argv) {
 
         timer_t t_inf;
         timer_start(&t_inf);
-        status_t inf_st = model_forward_ex(&model, &input_tensor, &head_output, NULL, &layer_prof);
+        status_t inf_st =
+            model_forward_ex(&model, &input_tensor, &head_output, NULL, layer_profile ? &layer_prof : NULL);
         timer_stop(&t_inf);
         double ms_inf = timer_elapsed_ms(&t_inf);
 
@@ -254,9 +281,11 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        char layer_title[64];
-        snprintf(layer_title, sizeof layer_title, "  model_forward steps (frame %d), ms:", i);
-        model_forward_profile_print_last(&layer_prof, stdout, layer_title);
+        if (layer_profile) {
+            char layer_title[64];
+            snprintf(layer_title, sizeof layer_title, "  model_forward steps (frame %d), ms:", i);
+            model_forward_profile_print_last(&layer_prof, stdout, layer_title);
+        }
 
         timer_t t_dec;
         timer_start(&t_dec);
@@ -268,7 +297,7 @@ int main(int argc, char** argv) {
         if (save_bmp) {
             timer_t t_viz;
             timer_start(&t_viz);
-            status_t viz_st = visualize_save_frame_bmp(argv[1], rgb_buffer, W, H, &results, 2);
+            status_t viz_st = visualize_save_frame_bmp(bmp_path, rgb_buffer, W, H, &results, 2);
             timer_stop(&t_viz);
             ms_viz = timer_elapsed_ms(&t_viz);
             if (viz_st != SUCCESS) {
@@ -291,7 +320,9 @@ int main(int argc, char** argv) {
         }
     }
 
-    model_forward_profile_print_aggregate(&layer_prof, stdout);
+    if (layer_profile) {
+        model_forward_profile_print_aggregate(&layer_prof, stdout);
+    }
 
     camera_stop(cam);
     camera_destroy(cam);

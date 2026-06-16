@@ -3,7 +3,18 @@
 #include "tensor.h"
 
 #ifdef USE_OPENBLAS
+/* Homebrew: include/cblas.h or include/openblas/cblas.h — Makefile adds both -I paths. */
+#if defined(__has_include)
+#if __has_include(<cblas.h>)
 #include <cblas.h>
+#elif __has_include(<openblas/cblas.h>)
+#include <openblas/cblas.h>
+#else
+#include <cblas.h> /* force compile error with a clear missing-header message */
+#endif
+#else
+#include <cblas.h>
+#endif
 #endif
 
 #ifdef __x86_64__

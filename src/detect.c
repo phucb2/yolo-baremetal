@@ -30,6 +30,28 @@ static void make_anchors_for_shape(int h, int w, int stride, float* ax, float* a
     }
 }
 
+int detect_anchor_count_for_input(int input_w, int input_h) {
+    int h0 = input_h / 8, w0 = input_w / 8;
+    int h1 = input_h / 16, w1 = input_w / 16;
+    int h2 = input_h / 32, w2 = input_w / 32;
+    return h0 * w0 + h1 * w1 + h2 * w2;
+}
+
+void detect_write_anchors_to_block(int input_w, int input_h, float* block) {
+    int strides[3] = {DETECT_STRIDE0, DETECT_STRIDE1, DETECT_STRIDE2};
+    int h[3] = {input_h / 8, input_h / 16, input_h / 32};
+    int w[3] = {input_w / 8, input_w / 16, input_w / 32};
+    float* ax = block;
+    int N = detect_anchor_count_for_input(input_w, input_h);
+    float* ay = block + N;
+    float* stride_buf = block + 2 * N;
+    int base = 0;
+    for (int s = 0; s < 3; s++) {
+        make_anchors_for_shape(h[s], w[s], strides[s], ax, ay, stride_buf, base);
+        base += h[s] * w[s];
+    }
+}
+
 static void dist2bbox_xyxy(const float* dist, const float* ax, const float* ay, int N, float* out_xyxy) {
     for (int j = 0; j < N; j++) {
         float l = dist[0 * N + j];
@@ -68,8 +90,23 @@ status_t detect_postprocess_from_pred(const float* pred, int N, int nc, int max_
     int k = max_det < N ? max_det : N;
     if (k > cap) k = cap;
 
-    float* mpa = (float*)malloc((size_t)N * sizeof(float));
-    if (!mpa) return ERROR_OUT_OF_MEMORY;
+    size_t flat_n = (size_t)k * (size_t)nc;
+    size_t sz_pairs = (size_t)N * 2u * sizeof(float);
+    size_t sz_ori = (size_t)k * sizeof(int);
+    size_t sz_gathered = flat_n * sizeof(float);
+    size_t sz_sort2 = flat_n * 2u * sizeof(float);
+    size_t off_ori = (sz_pairs + 7u) & ~(size_t)7u;
+    size_t off_gathered = off_ori + sz_ori;
+    size_t off_sort2 = off_gathered + sz_gathered;
+    size_t total_scratch = off_sort2 + sz_sort2;
+
+    unsigned char* scratch = (unsigned char*)malloc(total_scratch);
+    if (!scratch) return ERROR_OUT_OF_MEMORY;
+
+    float* pairs = (float*)scratch;
+    int* ori_index = (int*)(scratch + off_ori);
+    float* gathered = (float*)(scratch + off_gathered);
+    float* sort2 = (float*)(scratch + off_sort2);
 
     for (int a = 0; a < N; a++) {
         float m = -FLT_MAX;
@@ -78,63 +115,24 @@ status_t detect_postprocess_from_pred(const float* pred, int N, int nc, int max_
             float v = row[4 + c];
             if (v > m) m = v;
         }
-        mpa[a] = m;
-    }
-
-    float* pairs = (float*)malloc((size_t)N * 2 * sizeof(float));
-    if (!pairs) {
-        free(mpa);
-        return ERROR_OUT_OF_MEMORY;
-    }
-    for (int i = 0; i < N; i++) {
-        pairs[2 * i] = mpa[i];
-        pairs[2 * i + 1] = (float)i;
+        pairs[2 * a] = m;
+        pairs[2 * a + 1] = (float)a;
     }
     qsort(pairs, (size_t)N, 2 * sizeof(float), cmp_pair_desc);
-    free(mpa);
 
-    int* ori_index = (int*)malloc((size_t)k * sizeof(int));
-    if (!ori_index) {
-        free(pairs);
-        return ERROR_OUT_OF_MEMORY;
-    }
     for (int i = 0; i < k; i++) ori_index[i] = (int)pairs[2 * i + 1];
-    free(pairs);
 
-    float* gathered = (float*)malloc((size_t)k * (size_t)nc * sizeof(float));
-    if (!gathered) {
-        free(ori_index);
-        return ERROR_OUT_OF_MEMORY;
-    }
     for (int i = 0; i < k; i++) {
         int anchor = ori_index[i];
         const float* row = pred + (size_t)anchor * (size_t)(4 + nc);
         for (int c = 0; c < nc; c++) gathered[(size_t)i * (size_t)nc + (size_t)c] = row[4 + c];
     }
 
-    int flat_n = k * nc;
-    float* flat_vals = (float*)malloc((size_t)flat_n * sizeof(float));
-    if (!flat_vals) {
-        free(gathered);
-        free(ori_index);
-        return ERROR_OUT_OF_MEMORY;
-    }
-    for (int i = 0; i < k; i++) {
-        for (int c = 0; c < nc; c++) flat_vals[i * nc + c] = gathered[(size_t)i * (size_t)nc + (size_t)c];
-    }
-
-    float* sort2 = (float*)malloc((size_t)flat_n * 2 * sizeof(float));
-    if (!sort2) {
-        free(flat_vals);
-        free(gathered);
-        free(ori_index);
-        return ERROR_OUT_OF_MEMORY;
-    }
-    for (int i = 0; i < flat_n; i++) {
-        sort2[2 * i] = flat_vals[i];
+    for (size_t i = 0; i < flat_n; i++) {
+        sort2[2 * i] = gathered[i];
         sort2[2 * i + 1] = (float)i;
     }
-    qsort(sort2, (size_t)flat_n, 2 * sizeof(float), cmp_pair_desc);
+    qsort(sort2, flat_n, 2 * sizeof(float), cmp_pair_desc);
 
     float* outd = out->data;
     int row_stride = out->dims[2] * out->dims[3];
@@ -142,7 +140,7 @@ status_t detect_postprocess_from_pred(const float* pred, int N, int nc, int max_
         int flat_idx = (int)sort2[2 * t + 1];
         int anchor_slot = flat_idx / nc;
         int class_id = flat_idx % nc;
-        float score = flat_vals[flat_idx];
+        float score = gathered[(size_t)flat_idx];
         int idx_orig = ori_index[anchor_slot];
         const float* brow = pred + (size_t)idx_orig * (size_t)(4 + nc);
         float* row = outd + (size_t)t * (size_t)row_stride;
@@ -158,10 +156,7 @@ status_t detect_postprocess_from_pred(const float* pred, int N, int nc, int max_
         for (int u = 0; u < 6; u++) row[u] = 0.0f;
     }
 
-    free(sort2);
-    free(flat_vals);
-    free(gathered);
-    free(ori_index);
+    free(scratch);
     return SUCCESS;
 }
 
@@ -216,15 +211,11 @@ static status_t run_cv3(model_t* model, int d_idx, const char* cv3_branch, int s
     if (!dw00 || !db00 || !pw00 || !pb00 || !dw10 || !db10 || !pw10 || !pb10 || !wf || !bf)
         return ERROR_FILE_NOT_FOUND;
 
-    status_t st = dwconv3x3_same_forward(t_dw0, feat, dw00, db00);
-    if (st != SUCCESS) return st;
-    st = silu_forward(t_dw0);
+    status_t st = dwconv3x3_same_forward_fuse_silu(t_dw0, feat, dw00, db00);
     if (st != SUCCESS) return st;
     st = conv_block_forward(t_pw0, t_dw0, pw00, pb00, (conv_params_t){1, 0, 1}, true);
     if (st != SUCCESS) return st;
-    st = dwconv3x3_same_forward(t_dw1, t_pw0, dw10, db10);
-    if (st != SUCCESS) return st;
-    st = silu_forward(t_dw1);
+    st = dwconv3x3_same_forward_fuse_silu(t_dw1, t_pw0, dw10, db10);
     if (st != SUCCESS) return st;
     st = conv_block_forward(t_pw1, t_dw1, pw10, pb10, (conv_params_t){1, 0, 1}, true);
     if (st != SUCCESS) return st;
@@ -266,18 +257,36 @@ status_t detect_forward_one2one(model_t* model, int detect_module_idx, const ten
     }
     int N = H[0] * W[0] + H[1] * W[1] + H[2] * W[2];
 
-    float* ax = (float*)malloc((size_t)N * sizeof(float));
-    float* ay = (float*)malloc((size_t)N * sizeof(float));
-    float* stride_buf = (float*)malloc((size_t)N * sizeof(float));
+    int exp_h0 = model->input_h / 8, exp_w0 = model->input_w / 8;
+    int exp_h1 = model->input_h / 16, exp_w1 = model->input_w / 16;
+    int exp_h2 = model->input_h / 32, exp_w2 = model->input_w / 32;
+    int use_precomputed = model->detect_anchor_block != NULL && model->detect_anchor_N == N && H[0] == exp_h0 &&
+                          W[0] == exp_w0 && H[1] == exp_h1 && W[1] == exp_w1 && H[2] == exp_h2 && W[2] == exp_w2;
+
+    float* anchors = NULL;
+    int anchors_owned = 0;
+    float* ax;
+    float* ay;
+    float* stride_buf;
+    if (use_precomputed) {
+        ax = model->detect_anchor_block;
+        ay = ax + N;
+        stride_buf = ax + 2 * N;
+    } else {
+        anchors = (float*)malloc((size_t)3 * (size_t)N * sizeof(float));
+        if (!anchors) return ERROR_OUT_OF_MEMORY;
+        anchors_owned = 1;
+        ax = anchors;
+        ay = anchors + N;
+        stride_buf = anchors + 2 * N;
+    }
     float* boxes_dist = (float*)malloc((size_t)4 * (size_t)N * sizeof(float));
     float* cls_logits = (float*)malloc((size_t)nc * (size_t)N * sizeof(float));
     float* xyxy_grid = (float*)malloc((size_t)4 * (size_t)N * sizeof(float));
     float* xyxy_px = (float*)malloc((size_t)4 * (size_t)N * sizeof(float));
     float* pred = (float*)malloc((size_t)N * (size_t)(4 + nc) * sizeof(float));
-    if (!ax || !ay || !stride_buf || !boxes_dist || !cls_logits || !xyxy_grid || !xyxy_px || !pred) {
-        free(ax);
-        free(ay);
-        free(stride_buf);
+    if ((anchors_owned && !anchors) || !boxes_dist || !cls_logits || !xyxy_grid || !xyxy_px || !pred) {
+        if (anchors_owned) free(anchors);
         free(boxes_dist);
         free(cls_logits);
         free(xyxy_grid);
@@ -286,10 +295,12 @@ status_t detect_forward_one2one(model_t* model, int detect_module_idx, const ten
         return ERROR_OUT_OF_MEMORY;
     }
 
-    int base = 0;
-    for (int s = 0; s < 3; s++) {
-        make_anchors_for_shape(H[s], W[s], strides[s], ax, ay, stride_buf, base);
-        base += H[s] * W[s];
+    if (!use_precomputed) {
+        int base = 0;
+        for (int s = 0; s < 3; s++) {
+            make_anchors_for_shape(H[s], W[s], strides[s], ax, ay, stride_buf, base);
+            base += H[s] * W[s];
+        }
     }
 
     int d = detect_module_idx;
@@ -425,9 +436,7 @@ status_t detect_forward_one2one(model_t* model, int detect_module_idx, const ten
     free(xyxy_grid);
     free(cls_logits);
     free(boxes_dist);
-    free(stride_buf);
-    free(ay);
-    free(ax);
+    if (anchors_owned) free(anchors);
     return pst;
 
 fail:
@@ -436,9 +445,7 @@ fail:
     free(xyxy_grid);
     free(cls_logits);
     free(boxes_dist);
-    free(stride_buf);
-    free(ay);
-    free(ax);
+    if (anchors_owned) free(anchors);
     return ERROR_FILE_NOT_FOUND;
 
 oom:
@@ -447,8 +454,6 @@ oom:
     free(xyxy_grid);
     free(cls_logits);
     free(boxes_dist);
-    free(stride_buf);
-    free(ay);
-    free(ax);
+    if (anchors_owned) free(anchors);
     return ERROR_OUT_OF_MEMORY;
 }

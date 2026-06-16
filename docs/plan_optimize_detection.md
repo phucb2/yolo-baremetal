@@ -1,6 +1,18 @@
+> **Use:** Track detection-head performance work (Detect forward + postprocess).  
+> **When:** Profiling, tuning, or reviewing what is left to optimize.
+
 # Detection head performance plan
 
-**Use:** Ideas to speed up `detect_forward_one2one` and `detect_postprocess_from_pred` in `src/detect.c`. **When:** Before profiling or refactoring the Detect step (`model_forward` step ~24, ~15%+ of forward time on typical runs).
+## Status (implementation)
+
+| Item | State |
+| :--- | :--- |
+| Coalesce `ax` / `ay` / `stride_buf` into one allocation | Done (`detect_forward_one2one`) |
+| Postprocess: one scratch `malloc`, drop redundant `mpa` / `flat_vals` copy | Done (`detect_postprocess_from_pred`) |
+| Fuse DW + SiLU after depthwise | Done (`dwconv3x3_same_forward_fuse_silu` in `run_cv3`) |
+| Per-scale head tensor reuse (`detect_workspace_t` / `model_t`) | Not started |
+| Precompute anchors when `H,W` fixed across forwards | Done (`model_t.detect_anchor_block` at `model_create`; `detect_forward_one2one` skips rebuild when P3/P4/P5 match `input_w`/`input_h`) |
+| Partial sort / SIMD postprocess | Not started |
 
 ## Scope
 
@@ -21,15 +33,15 @@ Hot spots tend to be **many convs** (same kernels as backbone) plus **allocation
 | Area | Issue | Direction |
 | :--- | :--- | :--- |
 | **Allocations** | Per-scale `tensor_allocate` / `tensor_free` for box/cls temps | **Reuse buffers** from `model_t` or a `detect_workspace_t` sized once for fixed `H,W` at each scale (same as `model_create` input size). |
-| **Anchors / strides** | `make_anchors_for_shape` + buffers every forward | If `H[s],W[s]` are fixed per model input, **precompute** `ax`, `ay`, `stride_buf` at load or first run. |
-| **SiLU after DW** | `run_cv3` calls `dwconv3x3_same_forward` then `silu_forward` | Fuse **DW + SiLU** in one pass (same idea as conv+fused SiLU) to cut a full tensor pass per block. |
+| **Anchors / strides** | `make_anchors_for_shape` + buffers every forward | **Done:** precompute at `model_create` into `detect_anchor_block` (3×N floats). Fallback: dynamic alloc + fill if feature sizes diverge from `model->input_w`/`input_h`. |
+| **SiLU after DW** | `run_cv3` calls `dwconv3x3_same_forward` then `silu_forward` | Fuse **DW + SiLU** in one pass (same idea as conv+fused SiLU) to cut a full tensor pass per block. **Implemented:** `dwconv3x3_same_forward_fuse_silu`. |
 | **GEMM** | Many 1×1 convs | Optional **`USE_OPENBLAS=1`** for `tensor_gemm` (see `docs/plan_layers_perf.md`). |
 
 ## Phase 2 — `detect_postprocess_from_pred`
 
 | Issue | Direction |
 | :--- | :--- |
-| **Many `malloc`s** | Single scratch arena (`malloc` once, or stack for small fixed caps) for `mpa`, `pairs`, `ori_index`, `gathered`, `flat_vals`, `sort2`. |
+| **Many `malloc`s** | Single scratch arena (`malloc` once, or stack for small fixed caps) for `mpa`, `pairs`, `ori_index`, `gathered`, `flat_vals`, `sort2`. **Partial:** one block for `pairs`…`sort2`; removed duplicate max buffer and `flat_vals` copy. |
 | **Full `qsort` on `N`** | Replace with **partial sort / `nth_element`-style** top‑`k` by score (or `std::partial_sort` equivalent in C) when `k ≪ N`. |
 | **Two-stage sorting** | Second sort over `k×nc` flattens; consider **one ranking** of `(anchor, class)` pairs if semantics match Ultralytics. |
 | **Per-row max** | **SIMD** (NEON/AVX) for argmax over `nc` logits per anchor. |

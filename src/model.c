@@ -6,6 +6,8 @@
 #include "utils.h"
 #include "detect.h"
 
+#define WEIGHT_BIN_MAGIC_V2 0xBF01
+
 status_t model_create(model_t* model, int input_w, int input_h) {
     if (!model) return ERROR_NULL_POINTER;
     model->input_w = input_w;
@@ -15,6 +17,8 @@ status_t model_create(model_t* model, int input_w, int input_h) {
     model->num_classes = 80;
     model->detect_anchor_block = NULL;
     model->detect_anchor_N = 0;
+    model->weight_file_version = 0;
+    model->quantized = false;
     
     // Allocate 24 buffers for the 24 layers defined in yolo26.yaml
     model->num_buffers = 24;
@@ -143,6 +147,7 @@ static void fold_all_bn(model_t* model) {
         for (int i = 0; i < model->num_weights; i++) {
             const char* name = model->weights[i].name;
             if (!ends_with(name, ".conv.weight")) continue;
+            if (model->weights[i].tensor.dtype == TENSOR_DTYPE_INT8) continue;
             prefix_from_conv_weight_name(name, prefix, sizeof(prefix));
             if (!prefix[0]) continue;
             snprintf(buf, sizeof buf, "%s.bn.weight", prefix);
@@ -199,18 +204,73 @@ status_t model_load_weights(model_t* model, const char* path) {
     FILE* f = fopen(path, "rb");
     if (!f) return ERROR_FILE_NOT_FOUND;
     int nc, total_params;
-    fread(&nc, sizeof(int), 1, f);
-    fread(&total_params, sizeof(int), 1, f);
+    if (fread(&nc, sizeof(int), 1, f) != 1) {
+        fclose(f);
+        return ERROR_INVALID_FORMAT;
+    }
+    if (fread(&total_params, sizeof(int), 1, f) != 1) {
+        fclose(f);
+        return ERROR_INVALID_FORMAT;
+    }
     model->num_classes = nc;
     model->num_weights = total_params;
-    model->weights = (named_tensor_t*)malloc(sizeof(named_tensor_t) * total_params);
-    for (int i = 0; i < total_params; i++) load_named_tensor(f, model->weights[i].name, &model->weights[i].tensor);
+    model->weight_file_version = 1;
+    model->quantized = false;
+
+    long pos_after_count = ftell(f);
+    int maybe_version = 0;
+    if (fread(&maybe_version, sizeof(int), 1, f) == 1 && maybe_version == WEIGHT_BIN_MAGIC_V2) {
+        model->weight_file_version = 2;
+    } else {
+        fseek(f, pos_after_count, SEEK_SET);
+    }
+
+    model->weights = (named_tensor_t*)malloc(sizeof(named_tensor_t) * (size_t)total_params);
+    if (!model->weights) {
+        fclose(f);
+        return ERROR_OUT_OF_MEMORY;
+    }
+    for (int i = 0; i < total_params; i++) {
+        status_t st = load_named_tensor(f, model->weights[i].name, &model->weights[i].tensor, model->weight_file_version);
+        if (st != SUCCESS) {
+            for (int j = 0; j < i; j++) tensor_free(&model->weights[j].tensor);
+            free(model->weights);
+            model->weights = NULL;
+            model->num_weights = 0;
+            fclose(f);
+            return st;
+        }
+        if (model->weights[i].tensor.dtype == TENSOR_DTYPE_INT8) model->quantized = true;
+    }
     fclose(f);
 
     fold_all_bn(model);
-    printf("Successfully loaded %d tensors (after BN fold, %d tensors in memory)\n", total_params,
-           model->num_weights);
+    printf("Successfully loaded %d tensors (v%d, quantized=%s, %d tensors in memory)\n", total_params,
+           model->weight_file_version, model->quantized ? "yes" : "no", model->num_weights);
     return SUCCESS;
+}
+
+float model_act_scale_for_weight(model_t* model, const char* weight_name) {
+    if (!model || !weight_name) return 0.0f;
+    char prefix[160];
+    size_t ln = strlen(weight_name);
+    const char* suf = NULL;
+    if (ln > 12 && strcmp(weight_name + ln - 12, ".conv.weight") == 0) {
+        suf = ".conv.weight";
+    } else if (ln > 7 && strcmp(weight_name + ln - 7, ".weight") == 0) {
+        suf = ".weight";
+    }
+    if (!suf) return 0.0f;
+    size_t plen = ln - strlen(suf);
+    if (plen >= sizeof(prefix)) plen = sizeof(prefix) - 1;
+    memcpy(prefix, weight_name, plen);
+    prefix[plen] = '\0';
+
+    char key[200];
+    snprintf(key, sizeof key, "__act_scale.%s", prefix);
+    tensor_t* t = model_get_weight(model, key);
+    if (!t || !t->data) return 0.0f;
+    return t->data[0];
 }
 
 
@@ -685,6 +745,7 @@ static status_t conv_blk(model_t* m, const char* wname, const char* bname, const
     tensor_t* w = model_get_weight(m, wname);
     tensor_t* b = model_get_weight(m, bname);
     if (!w || !b) return ERROR_FILE_NOT_FOUND;
+    p.input_scale = model_act_scale_for_weight(m, wname);
     return conv_block_forward(out, in, w, b, p, act);
 }
 

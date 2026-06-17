@@ -10,7 +10,7 @@ endif
 
 TARGET = yolo26_bench
 BUILD_DIR = build
-CFLAGS = -O3 -Iinclude -Ithird_party -Wall -Wextra -std=c11
+CFLAGS = -O3 -Iinclude -Ithird_party -Wall -Wextra -std=c11 -DUSE_INT8=1
 LDFLAGS = -framework Foundation -framework AVFoundation -framework CoreVideo -framework CoreMedia -lm
 
 # Without -isysroot, clang may not find system headers (e.g. stdlib.h) while parsing intrinsics.
@@ -28,6 +28,10 @@ ifeq ($(UNAME_M),arm64)
 endif
 ifeq ($(UNAME_M),x86_64)
 	CFLAGS += -mavx2 -mfma -march=native
+	# Server SKUs: make GEMM_PREFER_AVX512_VNNI=1 to prefer 512-bit VNNI over AVX-VNNI.
+	ifeq ($(GEMM_PREFER_AVX512_VNNI),1)
+		CFLAGS += -DGEMM_PREFER_AVX512_VNNI
+	endif
 endif
 
 # OpenBLAS: USE_OPENBLAS=1. Set OPENBLAS_PREFIX if headers/libs are not found (e.g. brew install openblas).
@@ -58,8 +62,9 @@ CORE_OBJ = $(TENSOR_OBJ) $(BUILD_DIR)/utils.o $(BUILD_DIR)/layers.o $(BUILD_DIR)
 TEST_CORE = tests/test_core
 VERIFY_LAYERS = tests/verify_layers
 BENCH_GEMM = tests/bench_gemm
+BENCH_COCO8 = tests/bench_coco8
 PT_MODEL ?= weights/yolo26n.pt
-C_WEIGHTS ?= weights/yolo26.bin
+C_WEIGHTS ?= weights/yolo26_int8.bin
 PYTHON_EVAL ?= uv run python
 
 $(TARGET): $(OBJ)
@@ -73,7 +78,7 @@ $(VERIFY_LAYERS): tests/verify_layers.c $(CORE_OBJ)
 
 verify: $(TEST_CORE) $(TARGET)
 	./$(TEST_CORE)
-	python3 -m py_compile tools/converter.py tools/generate_layer_tests.py tools/inference_py.py
+	python3 -m py_compile tools/converter.py tools/calibrate_quant.py tools/generate_layer_tests.py tools/inference_py.py
 
 # Unit tests + golden layer parity (fixtures under tests/data/ are optional; missing bins SKIP).
 .PHONY: e2e
@@ -85,13 +90,22 @@ e2e: $(TEST_CORE) $(TARGET) $(VERIFY_LAYERS)
 $(BENCH_GEMM): tests/bench_gemm.c $(TENSOR_OBJ) $(BUILD_DIR)/utils.o | $(BUILD_DIR)
 	$(CC) $(CFLAGS) tests/bench_gemm.c $(TENSOR_OBJ) $(BUILD_DIR)/utils.o -o $(BENCH_GEMM) -lm $(BLAS_LDFLAGS)
 
-.PHONY: bench
+$(BENCH_COCO8): tests/bench_coco8.c $(CORE_OBJ) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) tests/bench_coco8.c $(CORE_OBJ) -o $(BENCH_COCO8) -lm $(BLAS_LDFLAGS)
+
+.PHONY: bench bench-coco8
 bench: $(BENCH_GEMM)
 	./$(BENCH_GEMM)
 
-.PHONY: eval-coco8
+bench-coco8: $(BENCH_COCO8)
+	$(PYTHON_EVAL) tools/bench_coco8.py --c-bin "./$(BENCH_COCO8)" --c-weights "$(C_WEIGHTS)"
+
+.PHONY: eval-coco8 eval-coco8-int8
 eval-coco8: $(TARGET)
 	$(PYTHON_EVAL) tools/eval_coco8.py --pt "$(PT_MODEL)" --c-bin "./$(TARGET)" --c-weights "$(C_WEIGHTS)"
+
+eval-coco8-int8: $(TARGET)
+	$(PYTHON_EVAL) tools/eval_coco8.py --c-only --c-bin "./$(TARGET)" --c-weights "weights/yolo26_int8.bin"
 
 regenerate-golden:
 	bash tools/with_py39.sh python tools/generate_layer_tests.py
@@ -109,4 +123,4 @@ $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
 clean:
-	rm -rf $(BUILD_DIR) $(TARGET) $(TEST_CORE) $(VERIFY_LAYERS) $(BENCH_GEMM)
+	rm -rf $(BUILD_DIR) $(TARGET) $(TEST_CORE) $(VERIFY_LAYERS) $(BENCH_GEMM) $(BENCH_COCO8)

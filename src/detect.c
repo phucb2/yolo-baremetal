@@ -177,12 +177,18 @@ static status_t run_cv2(model_t* model, int d_idx, const char* cv2_branch, int s
     const tensor_t* b2 = model_get_weight(model, name);
     if (!w0 || !b0 || !w1 || !b1 || !w2 || !b2) return ERROR_FILE_NOT_FOUND;
 
-    conv_params_t p3 = {1, 1, 1};
+    char wname0[200], wname1[200], wname2[200];
+    snprintf(wname0, sizeof wname0, "model.%d.%s.%d.0.conv.weight", d_idx, cv2_branch, scale);
+    snprintf(wname1, sizeof wname1, "model.%d.%s.%d.1.conv.weight", d_idx, cv2_branch, scale);
+    snprintf(wname2, sizeof wname2, "model.%d.%s.%d.2.weight", d_idx, cv2_branch, scale);
+    conv_params_t p3 = {1, 1, 1, model_act_scale_for_weight(model, wname0)};
     status_t st = conv_block_forward(s1, feat, w0, b0, p3, true);
     if (st != SUCCESS) return st;
-    st = conv_block_forward(s2, s1, w1, b1, p3, true);
+    conv_params_t p3b = {1, 1, 1, model_act_scale_for_weight(model, wname1)};
+    st = conv_block_forward(s2, s1, w1, b1, p3b, true);
     if (st != SUCCESS) return st;
-    return conv2d_forward(out_box, s2, w2, b2, (conv_params_t){1, 0, 1}, false);
+    conv_params_t p1 = {1, 0, 1, model_act_scale_for_weight(model, wname2)};
+    return conv2d_forward(out_box, s2, w2, b2, p1, false);
 }
 
 static status_t run_cv3(model_t* model, int d_idx, const char* cv3_branch, int scale, const tensor_t* feat,
@@ -211,15 +217,26 @@ static status_t run_cv3(model_t* model, int d_idx, const char* cv3_branch, int s
     if (!dw00 || !db00 || !pw00 || !pb00 || !dw10 || !db10 || !pw10 || !pb10 || !wf || !bf)
         return ERROR_FILE_NOT_FOUND;
 
+    snprintf(name, sizeof name, "model.%d.%s.%d.0.0.conv.weight", d_idx, cv3_branch, scale);
+    float s_dw0 = model_act_scale_for_weight(model, name);
+    snprintf(name, sizeof name, "model.%d.%s.%d.0.1.conv.weight", d_idx, cv3_branch, scale);
+    float s_pw0 = model_act_scale_for_weight(model, name);
+    snprintf(name, sizeof name, "model.%d.%s.%d.1.0.conv.weight", d_idx, cv3_branch, scale);
+    float s_dw1 = model_act_scale_for_weight(model, name);
+    snprintf(name, sizeof name, "model.%d.%s.%d.1.1.conv.weight", d_idx, cv3_branch, scale);
+    float s_pw1 = model_act_scale_for_weight(model, name);
+    snprintf(name, sizeof name, "model.%d.%s.%d.2.weight", d_idx, cv3_branch, scale);
+    float s_wf = model_act_scale_for_weight(model, name);
+
     status_t st = dwconv3x3_same_forward_fuse_silu(t_dw0, feat, dw00, db00);
     if (st != SUCCESS) return st;
-    st = conv_block_forward(t_pw0, t_dw0, pw00, pb00, (conv_params_t){1, 0, 1}, true);
+    st = conv_block_forward(t_pw0, t_dw0, pw00, pb00, (conv_params_t){1, 0, 1, s_pw0}, true);
     if (st != SUCCESS) return st;
     st = dwconv3x3_same_forward_fuse_silu(t_dw1, t_pw0, dw10, db10);
     if (st != SUCCESS) return st;
-    st = conv_block_forward(t_pw1, t_dw1, pw10, pb10, (conv_params_t){1, 0, 1}, true);
+    st = conv_block_forward(t_pw1, t_dw1, pw10, pb10, (conv_params_t){1, 0, 1, s_pw1}, true);
     if (st != SUCCESS) return st;
-    return conv2d_forward(out_cls, t_pw1, wf, bf, (conv_params_t){1, 0, 1}, false);
+    return conv2d_forward(out_cls, t_pw1, wf, bf, (conv_params_t){1, 0, 1, s_wf}, false);
 }
 
 static void copy_box_to_concat(const tensor_t* box, int N_total, int offset, float* boxes_dist) {

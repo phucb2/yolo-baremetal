@@ -41,6 +41,9 @@ typedef struct {
     /* P3/P4/P5 anchor grid (ax, ay, stride), 3×N floats; filled at model_create for fixed letterbox size. */
     float* detect_anchor_block;
     int detect_anchor_N;
+
+    int weight_file_version;
+    bool quantized;
 } model_t;
 
 status_t model_create(model_t* model, int input_w, int input_h);
@@ -54,5 +57,7 @@ status_t model_forward_ex(model_t* model, const tensor_t* input, tensor_t* outpu
                           model_forward_profile_t* profile);
 status_t model_load_weights(model_t* model, const char* path);
 tensor_t* model_get_weight(model_t* model, const char* name);
+/* Lookup __act_scale.<prefix> for conv weight name (strips .conv.weight / .weight). Returns 0 if missing. */
+float model_act_scale_for_weight(model_t* model, const char* weight_name);
 
 #endif

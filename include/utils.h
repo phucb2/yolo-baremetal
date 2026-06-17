@@ -44,8 +44,8 @@ void timer_start(timer_t* timer);
 void timer_stop(timer_t* timer);
 double timer_elapsed_ms(const timer_t* timer);
 
-// Binary tensor loading / saving (same layout as tools/generate_layer_tests.py save_tensor)
-status_t load_named_tensor(FILE* f, char* name, tensor_t* tensor);
+// Binary tensor loading / saving (v1 FP32 or v2 with dtype; file_version 0/1 = legacy)
+status_t load_named_tensor(FILE* f, char* name, tensor_t* tensor, int file_version);
 status_t save_named_tensor(FILE* f, const char* name, const tensor_t* tensor);
 
 // BatchNorm folding

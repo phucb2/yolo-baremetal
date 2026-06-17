@@ -243,9 +243,10 @@ def _run_c_predictions(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate PyTorch and C implementations on Ultralytics COCO8.")
-    parser.add_argument("--pt", required=True, help="Path to PyTorch .pt model")
+    parser.add_argument("--pt", default=None, help="Path to PyTorch .pt model (optional with --c-only)")
     parser.add_argument("--c-bin", default="./yolo26_bench", help="Path to C inference binary")
-    parser.add_argument("--c-weights", default="weights/yolo26.bin", help="Path to C .bin weights")
+    parser.add_argument("--c-weights", default="weights/yolo26_int8.bin", help="Path to C .bin weights (default: INT8)")
+    parser.add_argument("--c-only", action="store_true", help="Evaluate C backend only (skip PyTorch)")
     parser.add_argument("--input-size", type=int, default=640, help="Model input size (square)")
     parser.add_argument("--conf", type=float, default=0.001, help="Confidence threshold for both backends")
     parser.add_argument("--max-images", type=int, default=0, help="Optional cap for smoke tests (0 = all)")
@@ -259,27 +260,36 @@ def main() -> None:
         gt_dict["images"] = [im for im in gt_dict["images"] if im["id"] in keep_ids]
         gt_dict["annotations"] = [ann for ann in gt_dict["annotations"] if ann["image_id"] in keep_ids]
 
+    if not args.c_only and not args.pt:
+        raise SystemExit("Provide --pt or pass --c-only")
+
     print(f"COCO8 val dir: {val_dir}")
     print(f"Evaluating {len(image_meta)} image(s)")
+    if args.c_only:
+        print(f"C weights: {args.c_weights}")
 
-    pt_preds = _run_pt_predictions(args.pt, image_meta, args.input_size, args.conf)
-    print(f"PyTorch predictions: {len(pt_preds)}")
-    pt_metrics = _eval_predictions(gt_dict, pt_preds)
+    pt_metrics = None
+    if not args.c_only:
+        pt_preds = _run_pt_predictions(args.pt, image_meta, args.input_size, args.conf)
+        print(f"PyTorch predictions: {len(pt_preds)}")
+        pt_metrics = _eval_predictions(gt_dict, pt_preds)
 
     c_preds = _run_c_predictions(args.c_bin, args.c_weights, image_meta, args.input_size, args.conf)
     print(f"C predictions: {len(c_preds)}")
     c_metrics = _eval_predictions(gt_dict, c_preds)
 
     print("\nResults")
-    print(
-        f"PyTorch: mAP@[.5:.95]={pt_metrics['map']:.4f} mAP50={pt_metrics['map50']:.4f} mAP75={pt_metrics['map75']:.4f}"
-    )
+    if pt_metrics is not None:
+        print(
+            f"PyTorch: mAP@[.5:.95]={pt_metrics['map']:.4f} mAP50={pt_metrics['map50']:.4f} mAP75={pt_metrics['map75']:.4f}"
+        )
     print(f"C      : mAP@[.5:.95]={c_metrics['map']:.4f} mAP50={c_metrics['map50']:.4f} mAP75={c_metrics['map75']:.4f}")
-    print(
-        f"Delta  : mAP={c_metrics['map'] - pt_metrics['map']:+.4f} "
-        f"mAP50={c_metrics['map50'] - pt_metrics['map50']:+.4f} "
-        f"mAP75={c_metrics['map75'] - pt_metrics['map75']:+.4f}"
-    )
+    if pt_metrics is not None:
+        print(
+            f"Delta  : mAP={c_metrics['map'] - pt_metrics['map']:+.4f} "
+            f"mAP50={c_metrics['map50'] - pt_metrics['map50']:+.4f} "
+            f"mAP75={c_metrics['map75'] - pt_metrics['map75']:+.4f}"
+        )
 
 
 if __name__ == "__main__":

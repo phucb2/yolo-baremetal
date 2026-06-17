@@ -96,30 +96,38 @@ status_t upsample_nearest_forward(tensor_t* output, const tensor_t* input, int s
     return SUCCESS;
 }
 
-status_t conv2d_forward(tensor_t* output, const tensor_t* input, 
-                       const tensor_t* weight, const tensor_t* bias, 
-                       conv_params_t params, bool fuse_silu) {
+status_t conv2d_forward(tensor_t* output, const tensor_t* input, const tensor_t* weight, const tensor_t* bias,
+                        conv_params_t params, bool fuse_silu) {
     if (!output || !input || !weight) return ERROR_NULL_POINTER;
     int out_c = weight->dims[0], in_c = weight->dims[1], kh = weight->dims[2], kw = weight->dims[3];
     int in_h = input->dims[2], in_w = input->dims[3], out_h = output->dims[2], out_w = output->dims[3];
     int plane = out_h * out_w;
+    int n_spatial = in_h * in_w;
+
+    const int use_int8_weight = (weight->dtype == TENSOR_DTYPE_INT8 && weight->qdata && weight->scales);
+    (void)params.input_scale;
 
     if (kh == 1 && kw == 1 && params.stride == 1 && params.padding == 0) {
-        tensor_gemm(output->data, weight->data, input->data, out_c, in_h * in_w, in_c, 1.0f, 0.0f);
+        if (use_int8_weight) {
+            /* W8A32: INT8 weights, FP32 activations. W8A8 needs per-layer calibrated input_scale. */
+            status_t st = tensor_gemm_weight_int8(output->data, weight->qdata, input->data, weight->scales, out_c,
+                                                  n_spatial, in_c);
+            if (st != SUCCESS) return st;
+        } else {
+            tensor_gemm(output->data, weight->data, input->data, out_c, n_spatial, in_c, 1.0f, 0.0f);
+        }
         conv2d_finish_output(output->data, out_c, plane, bias, fuse_silu);
         return SUCCESS;
     }
 
-    /* K = in_c*kh*kw patch rows; N = out_h*out_w columns (same layout as weight rows for GEMM). */
     int k_patch = in_c * kh * kw;
-    int n_spatial = out_h * out_w;
+    n_spatial = out_h * out_w;
     size_t col_elems = (size_t)k_patch * (size_t)n_spatial;
     float* col = (float*)malloc(col_elems * sizeof(float));
     if (!col) return ERROR_OUT_OF_MEMORY;
 
     const float* in_plane = input->data;
     const int patch_plane = kh * kw;
-    /* Row-major B rows: contiguous writes for GEMM's B[k,:] reads. */
     for (int j = 0; j < k_patch; j++) {
         int ic = j / patch_plane;
         int rem = j % patch_plane;
@@ -139,8 +147,15 @@ status_t conv2d_forward(tensor_t* output, const tensor_t* input,
         }
     }
 
-    tensor_gemm(output->data, weight->data, col, out_c, n_spatial, k_patch, 1.0f, 0.0f);
-    free(col);
+    if (use_int8_weight) {
+        status_t st =
+            tensor_gemm_weight_int8(output->data, weight->qdata, col, weight->scales, out_c, n_spatial, k_patch);
+        free(col);
+        if (st != SUCCESS) return st;
+    } else {
+        tensor_gemm(output->data, weight->data, col, out_c, n_spatial, k_patch, 1.0f, 0.0f);
+        free(col);
+    }
 
     conv2d_finish_output(output->data, out_c, plane, bias, fuse_silu);
     return SUCCESS;
@@ -486,10 +501,18 @@ static status_t dwconv3x3_same_direct(tensor_t* out, const tensor_t* in, const t
 
     for (int ci = 0; ci < c; ci++) {
         const float* in_plane = in->data + (size_t)ci * (size_t)n_spatial;
-        const float* w9 = w->data + (size_t)ci * 9u;
         float b = bias ? bias->data[ci] : 0.0f;
         float* out_plane = out->data + (size_t)ci * (size_t)n_spatial;
-        dwconv3x3_same_plane_direct(in_plane, h, wi, w9, b, out_plane, fuse_silu);
+        if (w->dtype == TENSOR_DTYPE_INT8 && w->qdata && w->scales) {
+            float w_scale = w->scales[ci];
+            float wf[9];
+            const int8_t* w9q = w->qdata + (size_t)ci * 9u;
+            for (int t = 0; t < 9; t++) wf[t] = (float)w9q[t] * w_scale;
+            dwconv3x3_same_plane_direct(in_plane, h, wi, wf, b, out_plane, fuse_silu);
+        } else {
+            const float* w9 = w->data + (size_t)ci * 9u;
+            dwconv3x3_same_plane_direct(in_plane, h, wi, w9, b, out_plane, fuse_silu);
+        }
     }
     return SUCCESS;
 }
@@ -501,6 +524,53 @@ status_t dwconv3x3_same_forward(tensor_t* out, const tensor_t* in, const tensor_
 status_t dwconv3x3_same_forward_fuse_silu(tensor_t* out, const tensor_t* in, const tensor_t* w,
                                             const tensor_t* bias) {
     return dwconv3x3_same_direct(out, in, w, bias, 1);
+}
+
+static float dwconv3x3_int8_pixel_sum(const int8_t* in_q, int h, int wi, const int8_t* w9, float b, float in_scale,
+                                      float w_scale, int oh, int ow) {
+    float s = b;
+    float prod_scale = in_scale * w_scale;
+    for (int kh = 0; kh < 3; kh++) {
+        for (int kw = 0; kw < 3; kw++) {
+            int ih = oh - 1 + kh, iw = ow - 1 + kw;
+            if (ih >= 0 && ih < h && iw >= 0 && iw < wi) {
+                s += prod_scale * (float)in_q[ih * wi + iw] * (float)w9[kh * 3 + kw];
+            }
+        }
+    }
+    return s;
+}
+
+static void dwconv3x3_same_plane_int8(const float* in_plane, int h, int wi, const int8_t* w9, float b, float in_scale,
+                                      float w_scale, float* out_plane, int fuse_silu) {
+    int8_t* in_q = (int8_t*)malloc((size_t)h * (size_t)wi);
+    if (!in_q) return;
+    tensor_quantize_symmetric(in_plane, in_q, h * wi, in_scale);
+    for (int oh = 0; oh < h; oh++) {
+        for (int ow = 0; ow < wi; ow++) {
+            float s = dwconv3x3_int8_pixel_sum(in_q, h, wi, w9, b, in_scale, w_scale, oh, ow);
+            out_plane[oh * wi + ow] = fuse_silu ? silu_f(s) : s;
+        }
+    }
+    free(in_q);
+}
+
+status_t dwconv3x3_same_forward_fuse_silu_quant(tensor_t* out, const tensor_t* in, const tensor_t* w,
+                                                const tensor_t* bias, float input_scale) {
+    if (!out || !in || !w || w->dtype != TENSOR_DTYPE_INT8 || !w->qdata || !w->scales || input_scale <= 0.0f)
+        return dwconv3x3_same_forward_fuse_silu(out, in, w, bias);
+
+    int c = in->dims[1], h = in->dims[2], wi = in->dims[3];
+    int n_spatial = h * wi;
+    for (int ci = 0; ci < c; ci++) {
+        const float* in_plane = in->data + (size_t)ci * (size_t)n_spatial;
+        const int8_t* w9 = w->qdata + (size_t)ci * 9u;
+        float w_scale = w->scales[ci];
+        float b = bias ? bias->data[ci] : 0.0f;
+        float* out_plane = out->data + (size_t)ci * (size_t)n_spatial;
+        dwconv3x3_same_plane_int8(in_plane, h, wi, w9, b, input_scale, w_scale, out_plane, 1);
+    }
+    return SUCCESS;
 }
 
 static void softmax_rows_nn(float* attn, int N) {

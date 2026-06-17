@@ -31,7 +31,7 @@ static status_t load_input_from_tensor_bin(const char* path, tensor_t* out_input
     FILE* fp = fopen(path, "rb");
     if (!fp) return ERROR_FILE_NOT_FOUND;
     char name[256];
-    status_t st = load_named_tensor(fp, name, out_input);
+    status_t st = load_named_tensor(fp, name, out_input, 1);
     fclose(fp);
     if (st != SUCCESS) return st;
     if (out_input->dims[0] != 1 || out_input->dims[1] != 3 || out_input->dims[2] != 640 ||

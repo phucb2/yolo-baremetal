@@ -317,7 +317,7 @@ static FILE* open_test_data_bin(const char* filename) {
 static int load_tensor_map_fp(FILE* f, named_tensor_entry_t* map, int max_n) {
     int n = 0;
     while (n < max_n) {
-        if (load_named_tensor(f, map[n].name, &map[n].t) != SUCCESS) break;
+        if (load_named_tensor(f, map[n].name, &map[n].t, 1) != SUCCESS) break;
         n++;
     }
     fclose(f);
@@ -628,6 +628,100 @@ static void test_detect_postprocess(void) {
     tensor_free(&out);
 }
 
+static void test_gemm_int8_parity(void) {
+    const int M = 5, N = 7, K = 4;
+    int8_t A[M * K];
+    int8_t B[K * N];
+    float scales[M];
+    float C_ref[M * N];
+    float C_simd[M * N];
+
+    for (int i = 0; i < M * K; i++) A[i] = (int8_t)((i % 11) - 5);
+    for (int i = 0; i < K * N; i++) B[i] = (int8_t)((i % 9) - 4);
+    for (int i = 0; i < M; i++) scales[i] = 0.02f + (float)i * 0.003f;
+    const float input_scale = 0.04f;
+
+    for (int i = 0; i < M; i++) {
+        for (int j = 0; j < N; j++) {
+            int32_t acc = 0;
+            for (int k = 0; k < K; k++) acc += (int32_t)A[i * K + k] * (int32_t)B[k * N + j];
+            C_ref[i * N + j] = scales[i] * input_scale * (float)acc;
+        }
+    }
+
+    CHECK(tensor_gemm_int8(C_simd, A, B, scales, M, N, K, input_scale) == SUCCESS, "tensor_gemm_int8");
+    float md = 0.0f;
+    for (int i = 0; i < M * N; i++) {
+        float d = fabsf(C_simd[i] - C_ref[i]);
+        if (d > md) md = d;
+    }
+    CHECK(md < 1e-4f, "gemm_int8 simd vs ref");
+}
+
+static void test_conv_int8_parity(void) {
+    const int in_c = 4, out_c = 3, h = 5, w = 5;
+    tensor_t in, out_int8, wf, wf_fp32, bias;
+    tensor_allocate(&in, 1, in_c, h, w);
+    tensor_allocate(&out_int8, 1, out_c, h, w);
+    tensor_allocate(&wf_fp32, out_c, in_c, 1, 1);
+    tensor_allocate(&wf, out_c, in_c, 1, 1);
+    tensor_allocate(&bias, 1, out_c, 1, 1);
+
+    for (int i = 0; i < in_c * h * w; i++) in.data[i] = (float)(i % 11) * 0.07f - 0.2f;
+    for (int i = 0; i < out_c * in_c; i++) wf_fp32.data[i] = (float)(i % 7) * 0.05f - 0.1f;
+    for (int i = 0; i < out_c; i++) bias.data[i] = (float)i * 0.01f;
+
+    wf.dtype = TENSOR_DTYPE_INT8;
+    wf.num_scales = out_c;
+    wf.scales = (float*)malloc((size_t)out_c * sizeof(float));
+    wf.qdata = (int8_t*)malloc((size_t)out_c * (size_t)in_c);
+    CHECK(wf.scales && wf.qdata, "int8 weight alloc");
+    for (int oc = 0; oc < out_c; oc++) {
+        float amax = 0.0f;
+        for (int ic = 0; ic < in_c; ic++) {
+            float v = fabsf(wf_fp32.data[oc * in_c + ic]);
+            if (v > amax) amax = v;
+        }
+        wf.scales[oc] = amax / 127.0f;
+        if (wf.scales[oc] < 1e-8f) wf.scales[oc] = 1e-8f;
+        for (int ic = 0; ic < in_c; ic++) {
+            float q = roundf(wf_fp32.data[oc * in_c + ic] / wf.scales[oc]);
+            if (q > 127.0f) q = 127.0f;
+            if (q < -128.0f) q = -128.0f;
+            wf.qdata[oc * in_c + ic] = (int8_t)q;
+        }
+    }
+
+    conv_params_t p = {1, 0, 1, 0.0f};
+    const int plane = h * w;
+    tensor_t out_ref;
+    tensor_allocate(&out_ref, 1, out_c, h, w);
+    CHECK(tensor_gemm_weight_int8(out_ref.data, wf.qdata, in.data, wf.scales, out_c, plane, in_c) == SUCCESS,
+          "int8 gemm ref");
+    for (int oc = 0; oc < out_c; oc++) {
+        float b = bias.data[oc];
+        for (int pix = 0; pix < plane; pix++) {
+            out_ref.data[oc * plane + pix] += b;
+        }
+    }
+    CHECK(conv2d_forward(&out_int8, &in, &wf, &bias, p, false) == SUCCESS, "conv int8");
+
+    float md = max_abs_diff_tensor(&out_ref, &out_int8);
+    CHECK(md < 1e-4f, "int8 conv vs gemm ref");
+
+    free(wf.scales);
+    free(wf.qdata);
+    wf.scales = NULL;
+    wf.qdata = NULL;
+    wf.dtype = TENSOR_DTYPE_FP32;
+    tensor_free(&in);
+    tensor_free(&out_ref);
+    tensor_free(&out_int8);
+    tensor_free(&wf);
+    tensor_free(&wf_fp32);
+    tensor_free(&bias);
+}
+
 int main(void) {
     failures = 0;
     test_tensor_gemm();
@@ -635,6 +729,8 @@ int main(void) {
     test_conv1x1_gemm_path();
     test_conv3x3_im2col_gemm();
     test_conv_fuse_silu_parity();
+    test_gemm_int8_parity();
+    test_conv_int8_parity();
     test_fold_bn();
     test_fold_bn_nested_names_load();
     test_model_load_minimal();

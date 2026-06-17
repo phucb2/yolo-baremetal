@@ -48,7 +48,7 @@ static FILE* open_test_data_bin(const char* filename) {
 static int load_tensor_map_fp(FILE* f, named_tensor_entry_t* map, int max_n) {
     int n = 0;
     while (n < max_n) {
-        if (load_named_tensor(f, map[n].name, &map[n].t) != SUCCESS) break;
+        if (load_named_tensor(f, map[n].name, &map[n].t, 1) != SUCCESS) break;
         n++;
     }
     fclose(f);

@@ -1,5 +1,6 @@
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include "utils.h"
@@ -37,30 +38,82 @@ double timer_elapsed_ms(const timer_t* timer) {
 #endif
 }
 
-status_t load_named_tensor(FILE* f, char* name, tensor_t* tensor) {
+status_t load_named_tensor(FILE* f, char* name, tensor_t* tensor, int file_version) {
+    if (!f || !name || !tensor) return ERROR_NULL_POINTER;
+
+    memset(tensor, 0, sizeof(*tensor));
+    tensor->dtype = TENSOR_DTYPE_FP32;
+
     int name_len;
     if (fread(&name_len, sizeof(int), 1, f) != 1) return ERROR_FILE_NOT_FOUND;
-    fread(name, 1, name_len, f);
+    if (name_len <= 0 || name_len >= 128) return ERROR_INVALID_FORMAT;
+    if (fread(name, 1, (size_t)name_len, f) != (size_t)name_len) return ERROR_FILE_NOT_FOUND;
     name[name_len] = '\0';
-    
+
     int dim_count;
-    fread(&dim_count, sizeof(int), 1, f);
+    if (fread(&dim_count, sizeof(int), 1, f) != 1) return ERROR_INVALID_FORMAT;
+    if (dim_count < 1 || dim_count > 4) return ERROR_INVALID_FORMAT;
     int dims[4] = {1, 1, 1, 1};
     for (int d = 0; d < dim_count; d++) {
-        fread(&dims[d], sizeof(int), 1, f);
+        if (fread(&dims[d], sizeof(int), 1, f) != 1) return ERROR_INVALID_FORMAT;
     }
-    
-    status_t status = tensor_allocate(tensor, dims[0], dims[1], dims[2], dims[3]);
-    if (status != SUCCESS) return status;
-    
-    size_t total_elements = (size_t)dims[0] * dims[1] * dims[2] * dims[3];
-    size_t nread = fread(tensor->data, sizeof(float), total_elements, f);
-    UTIL_DEBUG_LOG_TENSOR_LOAD(name, total_elements, nread);
-    if (nread != total_elements) {
-        tensor_free(tensor);
-        return ERROR_INVALID_FORMAT;
+
+    int dtype = TENSOR_DTYPE_FP32;
+    if (file_version >= 2) {
+        if (fread(&dtype, sizeof(int), 1, f) != 1) return ERROR_INVALID_FORMAT;
     }
-    return SUCCESS;
+
+    size_t total_elements = (size_t)dims[0] * (size_t)dims[1] * (size_t)dims[2] * (size_t)dims[3];
+
+    if (dtype == TENSOR_DTYPE_FP32) {
+        status_t status = tensor_allocate(tensor, dims[0], dims[1], dims[2], dims[3]);
+        if (status != SUCCESS) return status;
+        size_t nread = fread(tensor->data, sizeof(float), total_elements, f);
+        UTIL_DEBUG_LOG_TENSOR_LOAD(name, total_elements, nread);
+        if (nread != total_elements) {
+            tensor_free(tensor);
+            return ERROR_INVALID_FORMAT;
+        }
+        return SUCCESS;
+    }
+
+    if (dtype == TENSOR_DTYPE_INT8) {
+        int num_scales = 0;
+        if (fread(&num_scales, sizeof(int), 1, f) != 1) return ERROR_INVALID_FORMAT;
+        if (num_scales <= 0) return ERROR_INVALID_FORMAT;
+
+        tensor->dims[0] = dims[0];
+        tensor->dims[1] = dims[1];
+        tensor->dims[2] = dims[2];
+        tensor->dims[3] = dims[3];
+        tensor->stride[3] = 1;
+        tensor->stride[2] = dims[3];
+        tensor->stride[1] = dims[2] * dims[3];
+        tensor->stride[0] = dims[1] * dims[2] * dims[3];
+        tensor->dtype = TENSOR_DTYPE_INT8;
+        tensor->num_scales = num_scales;
+        tensor->scales = (float*)malloc((size_t)num_scales * sizeof(float));
+        if (!tensor->scales) return ERROR_OUT_OF_MEMORY;
+        if (fread(tensor->scales, sizeof(float), (size_t)num_scales, f) != (size_t)num_scales) {
+            tensor_free(tensor);
+            return ERROR_INVALID_FORMAT;
+        }
+        tensor->qdata = (int8_t*)malloc_aligned(total_elements, 64);
+        if (!tensor->qdata) {
+            tensor_free(tensor);
+            return ERROR_OUT_OF_MEMORY;
+        }
+        tensor->is_owner = true;
+        size_t nread = fread(tensor->qdata, 1, total_elements, f);
+        UTIL_DEBUG_LOG_TENSOR_LOAD(name, total_elements, nread);
+        if (nread != total_elements) {
+            tensor_free(tensor);
+            return ERROR_INVALID_FORMAT;
+        }
+        return SUCCESS;
+    }
+
+    return ERROR_INVALID_FORMAT;
 }
 
 status_t save_named_tensor(FILE* f, const char* name, const tensor_t* tensor) {

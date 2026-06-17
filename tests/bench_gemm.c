@@ -95,7 +95,7 @@ int main(void) {
 #else
     const char* backend = "scalar/AVX (hand-rolled)";
 #endif
-    printf("tensor_gemm micro-benchmark — %s\n", backend);
+    printf("tensor_gemm micro-benchmark - %s\n", backend);
     printf("  (set OPENBLAS_NUM_THREADS=1 for stable OpenBLAS timings)\n\n");
 
     run_case("tiny (unit-test-like)", 5, 7, 4, 50000);
@@ -103,7 +103,7 @@ int main(void) {
     /* Conv-like 1x1: out_c x (H*W) @ in_c — large spatial N */
     run_case("large-N (conv-like)", 256, 4096, 256, 20);
 
-    printf("\ntensor_gemm_weight_int8 — backend: %s\n\n", tensor_gemm_int8_backend());
+    printf("\ntensor_gemm_weight_int8 - backend: %s\n\n", tensor_gemm_int8_backend());
     run_int8_case("int8 medium", 128, 320, 128, 500);
     run_int8_case("int8 large-N (conv-like)", 256, 4096, 256, 20);
 

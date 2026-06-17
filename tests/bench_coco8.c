@@ -7,7 +7,6 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
-#include <dirent.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,6 +16,14 @@
 #include "model.h"
 #include "tensor.h"
 #include "utils.h"
+
+#ifndef _WIN32
+#include <dirent.h>
+#else
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#undef ERROR
+#endif
 
 static void resize_rgb_bilinear(const uint8_t* src, int sw, int sh, uint8_t* dst, int dw, int dh) {
     if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) {
@@ -80,6 +87,62 @@ static int path_has_image_suffix(const char* path) {
 }
 
 static int collect_images_from_dir(const char* dir_path, image_path_t** out_paths, int* out_count) {
+#ifdef _WIN32
+    char pattern[4096];
+    snprintf(pattern, sizeof pattern, "%s\\*", dir_path);
+    WIN32_FIND_DATAA ffd;
+    HANDLE hFind = FindFirstFileA(pattern, &ffd);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        return 0;
+    }
+    int cap = 16;
+    int count = 0;
+    image_path_t* paths = (image_path_t*)malloc((size_t)cap * sizeof(image_path_t));
+    if (!paths) {
+        FindClose(hFind);
+        return 0;
+    }
+    do {
+        if (ffd.cFileName[0] == '.') {
+            continue;
+        }
+        if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            continue;
+        }
+        char full[4096];
+        snprintf(full, sizeof full, "%s\\%s", dir_path, ffd.cFileName);
+        if (!path_has_image_suffix(full)) {
+            continue;
+        }
+        if (count >= cap) {
+            cap *= 2;
+            image_path_t* grown = (image_path_t*)realloc(paths, (size_t)cap * sizeof(image_path_t));
+            if (!grown) {
+                for (int i = 0; i < count; i++) {
+                    free(paths[i].path);
+                }
+                free(paths);
+                FindClose(hFind);
+                return 0;
+            }
+            paths = grown;
+        }
+        paths[count].path = _strdup(full);
+        if (!paths[count].path) {
+            for (int i = 0; i < count; i++) {
+                free(paths[i].path);
+            }
+            free(paths);
+            FindClose(hFind);
+            return 0;
+        }
+        count++;
+    } while (FindNextFileA(hFind, &ffd) != 0);
+    FindClose(hFind);
+    *out_paths = paths;
+    *out_count = count;
+    return count > 0;
+#else
     DIR* dir = opendir(dir_path);
     if (!dir) {
         return 0;
@@ -129,6 +192,7 @@ static int collect_images_from_dir(const char* dir_path, image_path_t** out_path
     *out_paths = paths;
     *out_count = count;
     return 1;
+#endif
 }
 
 static int cmp_path(const void* a, const void* b) {

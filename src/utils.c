@@ -7,10 +7,21 @@
 #include "tensor.h"
 
 #ifdef __APPLE__
+#include <mach/mach_time.h>
 static mach_timebase_info_data_t timebase_info;
-static void init_timebase() {
+static void init_timebase(void) {
     if (timebase_info.denom == 0) {
         mach_timebase_info(&timebase_info);
+    }
+}
+#endif
+
+#ifdef _WIN32
+#include <windows.h>
+static LARGE_INTEGER timer_freq;
+static void init_timer_freq(void) {
+    if (timer_freq.QuadPart == 0) {
+        QueryPerformanceFrequency(&timer_freq);
     }
 }
 #endif
@@ -19,12 +30,25 @@ void timer_start(timer_t* timer) {
 #ifdef __APPLE__
     init_timebase();
     timer->start = mach_absolute_time();
+#elif defined(_WIN32)
+    init_timer_freq();
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    timer->start = (uint64_t)t.QuadPart;
+#else
+    (void)timer;
 #endif
 }
 
 void timer_stop(timer_t* timer) {
 #ifdef __APPLE__
     timer->end = mach_absolute_time();
+#elif defined(_WIN32)
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    timer->end = (uint64_t)t.QuadPart;
+#else
+    (void)timer;
 #endif
 }
 
@@ -33,7 +57,12 @@ double timer_elapsed_ms(const timer_t* timer) {
     uint64_t elapsed = timer->end - timer->start;
     double nanoseconds = (double)elapsed * timebase_info.numer / timebase_info.denom;
     return nanoseconds / 1000000.0;
+#elif defined(_WIN32)
+    if (timer_freq.QuadPart == 0) return 0.0;
+    const double elapsed = (double)(timer->end - timer->start);
+    return elapsed * 1000.0 / (double)timer_freq.QuadPart;
 #else
+    (void)timer;
     return 0.0;
 #endif
 }

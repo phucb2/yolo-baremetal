@@ -12,3 +12,5 @@ tests/fixtures/bench_640.png
 build/*
 
 datasets/*
+vcpkg_installed/*
+

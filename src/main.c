@@ -277,6 +277,11 @@ int main(int argc, char** argv) {
         return run_image_mode(argv[2], out_bmp, json_path, weights_path, conf_threshold, W, H, layer_profile);
     }
 
+#ifndef YOLO_USE_CAMERA
+    fprintf(stderr, "Built without camera support. Use --image <path>.\n");
+    return 1;
+#else
+
     const char* weights_path = "weights/yolo26.bin";
     float conf_threshold = 0.2f;
     const char* bmp_path = NULL;
@@ -426,4 +431,5 @@ int main(int argc, char** argv) {
     free(results.detections);
     
     return 0;
+#endif /* YOLO_USE_CAMERA */
 }

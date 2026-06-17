@@ -1,0 +1,57 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "win",
+      "displayName": "Windows Release",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "USE_CAMERA": "OFF"
+      }
+    },
+    {
+      "name": "win-onednn",
+      "displayName": "Windows Release + oneDNN",
+      "inherits": "win",
+      "cacheVariables": {
+        "USE_ONEDNN": "ON",
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+      }
+    },
+    {
+      "name": "mac",
+      "displayName": "macOS Release",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "USE_CAMERA": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "win",
+      "configurePreset": "win",
+      "configuration": "Release"
+    },
+    {
+      "name": "win-onednn",
+      "configurePreset": "win-onednn",
+      "configuration": "Release",
+      "targets": ["bench_gemm_compare", "playground"]
+    },
+    {
+      "name": "mac",
+      "configurePreset": "mac"
+    }
+  ]
+}

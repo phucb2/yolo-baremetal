@@ -8,8 +8,18 @@
 #include "tensor.h"
 
 #ifndef UTIL_DEBUG_LOG_PATH
-#define UTIL_DEBUG_LOG_PATH "/Users/phucbb/Personal/random-project/.cursor/debug-5d8ee2.log"
+#define UTIL_DEBUG_LOG_PATH "debug-yolo.log"
 #endif
+
+static inline long long util_debug_timestamp_ms(void) {
+#ifdef _WIN32
+    return (long long)time(NULL) * 1000;
+#else
+    struct timespec tss;
+    clock_gettime(CLOCK_REALTIME, &tss);
+    return (long long)tss.tv_sec * 1000 + tss.tv_nsec / 1000000;
+#endif
+}
 
 #ifdef NO_LOGGING
 #define UTIL_DEBUG_LOG_TENSOR_LOAD(name_str, expected_sz, got_sz) ((void)0)
@@ -18,21 +28,15 @@
     do {                                                                                                               \
         FILE* _df = fopen(UTIL_DEBUG_LOG_PATH, "a");                                                                   \
         if (_df) {                                                                                                     \
-            struct timespec _tss;                                                                                       \
-            clock_gettime(CLOCK_REALTIME, &_tss);                                                                      \
-            long long _ts = (long long)_tss.tv_sec * 1000 + _tss.tv_nsec / 1000000;                                      \
+            const long long _ts = util_debug_timestamp_ms();                                                           \
             fprintf(_df,                                                                                               \
-                    "{\"sessionId\":\"utils\",\"hypothesisId\":\"H1\",\"location\":\"utils.c:load_named_tensor\","       \
-                    "\"message\":\"fread_floats\",\"data\":{\"tensorName\":\"%s\",\"expected\":%zu,\"got\":%zu},"        \
-                    "\"timestamp\":%lld}\n",                                                                            \
+                    "{\"sessionId\":\"utils\",\"hypothesisId\":\"H1\",\"location\":\"utils.c:load_named_tensor\","     \
+                    "\"message\":\"fread_floats\",\"data\":{\"tensorName\":\"%s\",\"expected\":%zu,\"got\":%zu},"      \
+                    "\"timestamp\":%lld}\n",                                                                           \
                     (name_str), (size_t)(expected_sz), (size_t)(got_sz), _ts);                                         \
             fclose(_df);                                                                                               \
         }                                                                                                              \
     } while (0)
-#endif
-
-#ifdef __APPLE__
-#include <mach/mach_time.h>
 #endif
 
 typedef struct {

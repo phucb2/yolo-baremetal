@@ -629,7 +629,7 @@ static void test_detect_postprocess(void) {
 }
 
 static void test_gemm_int8_parity(void) {
-    const int M = 5, N = 7, K = 4;
+    enum { M = 5, N = 7, K = 4 };
     int8_t A[M * K];
     int8_t B[K * N];
     float scales[M];

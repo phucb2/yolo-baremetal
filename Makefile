@@ -10,7 +10,7 @@ endif
 
 TARGET = yolo26_bench
 BUILD_DIR = build
-CFLAGS = -O3 -Iinclude -Ithird_party -Wall -Wextra -std=c11 -DUSE_INT8=1
+CFLAGS = -O3 -Iinclude -Ithird_party -Wall -Wextra -std=c11 -DUSE_INT8=1 -DYOLO_USE_CAMERA
 LDFLAGS = -framework Foundation -framework AVFoundation -framework CoreVideo -framework CoreMedia -lm
 
 # Without -isysroot, clang may not find system headers (e.g. stdlib.h) while parsing intrinsics.

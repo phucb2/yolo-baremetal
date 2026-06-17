@@ -1,7 +1,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include "platform.h"
 #include "tensor.h"
+
+#ifdef _MSC_VER
+#include <malloc.h>
+#endif
 
 #ifdef USE_OPENBLAS
 #if defined(__has_include)
@@ -17,21 +22,22 @@
 #endif
 #endif
 
-#ifdef __x86_64__
-#include <immintrin.h>
-#endif
-#if defined(__aarch64__)
-#include <arm_neon.h>
-#endif
-
 void* malloc_aligned(size_t size, size_t alignment) {
     void* ptr = NULL;
+#ifdef _MSC_VER
+    ptr = _aligned_malloc(size, alignment);
+#else
     if (posix_memalign(&ptr, alignment, size) != 0) return NULL;
+#endif
     return ptr;
 }
 
 void free_aligned(void* ptr) {
+#ifdef _MSC_VER
+    _aligned_free(ptr);
+#else
     free(ptr);
+#endif
 }
 
 static void tensor_clear_fields(tensor_t* tensor) {
@@ -117,7 +123,7 @@ static float tensor_max_abs_f32(const float* src, int count) {
     for (int t = 0; t < 8; t++) {
         if (buf[t] > m) m = buf[t];
     }
-#elif defined(__aarch64__)
+#elif YOLO_ARCH_ARM64
     float32x4_t vmax = vdupq_n_f32(0.0f);
     for (; i <= count - 4; i += 4) {
         float32x4_t v = vld1q_f32(src + i);
@@ -151,7 +157,7 @@ void tensor_quantize_symmetric(const float* src, int8_t* dst, int count, float s
         __m128i packed8 = _mm_packs_epi16(packed16, packed16);
         _mm_storel_epi64((__m128i*)(dst + i), packed8);
     }
-#elif defined(__aarch64__)
+#elif YOLO_ARCH_ARM64
     float32x4_t inv4 = vdupq_n_f32(inv);
     for (; i <= count - 4; i += 4) {
         float32x4_t v = vmulq_f32(vld1q_f32(src + i), inv4);
@@ -215,7 +221,7 @@ status_t tensor_gemm(float* restrict C, const float* restrict A, const float* re
                 __m128 c_vec = _mm_loadu_ps(&c_row[j]);
                 _mm_storeu_ps(&c_row[j], _mm_add_ps(c_vec, _mm_mul_ps(a_vec, b_vec)));
             }
-#elif defined(__aarch64__)
+#elif YOLO_ARCH_ARM64
             float32x4_t a4 = vdupq_n_f32(a_val);
             for (; j <= N - 16; j += 16) {
                 float32x4_t b0 = vld1q_f32(&b_row[j]);
@@ -255,20 +261,44 @@ static int32_t gemm_int8_dot_col(const int8_t* a_row, const int8_t* B, int K, in
     return acc;
 }
 
-#if defined(__x86_64__) && defined(__AVX2__)
+#if YOLO_ARCH_X64 && defined(__AVX2__)
 
+#ifdef _MSC_VER
+#include <intrin.h>
+static void yolo_cpuid_ex(int info[4], int leaf, int subleaf) {
+    __cpuidex(info, leaf, subleaf);
+}
+static int yolo_cpuid_max_leaf(void) {
+    int info[4];
+    __cpuid(info, 0);
+    return info[0];
+}
+#else
 #include <cpuid.h>
+static void yolo_cpuid_ex(int info[4], int leaf, int subleaf) {
+    __cpuid_count(leaf, subleaf, (unsigned int*)info, (unsigned int*)info + 1, (unsigned int*)info + 2,
+                  (unsigned int*)info + 3);
+}
+static int yolo_cpuid_max_leaf(void) {
+    return (int)__get_cpuid_max(0, NULL);
+}
+#endif
 
 /* 0 = AVX2 only, 1 = AVX-VNNI (256-bit dpbusds), 2 = AVX512-VNNI */
 static int gemm_int8_vnni_level(void) {
     static int level = -1;
     if (level >= 0) return level;
-    if (__get_cpuid_max(0, NULL) < 7) {
+#ifdef _MSC_VER
+    level = 0;
+    return level;
+#else
+    if (yolo_cpuid_max_leaf() < 7) {
         level = 0;
         return level;
     }
-    unsigned eax, ebx, ecx, edx;
-    __cpuid_count(7, 0, eax, ebx, ecx, edx);
+    int info[4];
+    yolo_cpuid_ex(info, 7, 0);
+    const unsigned int ecx = (unsigned int)info[2];
 #ifdef GEMM_PREFER_AVX512_VNNI
     if (ecx & (1u << 11)) {
         level = 2;
@@ -288,6 +318,7 @@ static int gemm_int8_vnni_level(void) {
     }
 #endif
     return level;
+#endif
 }
 
 static inline __m256i gemm_int8_pack_b_k4x8(const int8_t* B, int k, int N, int j0) {
@@ -308,7 +339,8 @@ static inline __m256i gemm_int8_pack_b_k4x8(const int8_t* B, int k, int N, int j
     return _mm256_inserti128_si256(_mm256_castsi128_si256(lo), hi, 1);
 }
 
-__attribute__((target("avx512f,avx512vnni")))
+#if !defined(_MSC_VER)
+YOLO_GCC_TARGET("avx512f,avx512vnni")
 static inline __m512i gemm_int8_pack_b_k4x16(const int8_t* B, int k, int N, int j0) {
     const int8_t* b0 = B + (k + 0) * N + j0;
     const int8_t* b1 = B + (k + 1) * N + j0;
@@ -339,6 +371,7 @@ static inline __m512i gemm_int8_pack_b_k4x16(const int8_t* B, int k, int N, int 
     const __m256i p1 = _mm256_inserti128_si256(_mm256_castsi128_si256(ulo), uhi, 1);
     return _mm512_inserti64x4(_mm512_castsi256_si512(p0), p1, 1);
 }
+#endif /* !defined(_MSC_VER) */
 
 static void gemm_int8_row_block_avx2(float* c_row, const int8_t* a_row, const int8_t* B, int K, int N, int j0,
                                       int jb, float scale) {
@@ -383,10 +416,11 @@ static void gemm_int8_row_finish_tail(float* c_row, int32_t* ibuf, const int8_t*
     }
 }
 
-__attribute__((target("avx512f,avx512vnni")))
+#if !defined(_MSC_VER)
+YOLO_GCC_TARGET("avx512f,avx512vnni")
 static void gemm_int8_row_block_vnni512(float* c_row, const int8_t* a_row, const int8_t* B, int K, int N, int j0,
                                         int jb, float scale) {
-    int32_t ibuf[16] __attribute__((aligned(64)));
+    int32_t ibuf[16] YOLO_ALIGNED(64);
     memset(ibuf, 0, sizeof(ibuf));
     int k = 0;
 
@@ -412,10 +446,10 @@ static void gemm_int8_row_block_vnni512(float* c_row, const int8_t* a_row, const
     }
 }
 
-__attribute__((target("avx2,avx512vnni")))
+YOLO_GCC_TARGET("avx2,avx512vnni")
 static void gemm_int8_row_block_vnni256(float* c_row, const int8_t* a_row, const int8_t* B, int K, int N, int j0,
                                         int jb, float scale) {
-    int32_t ibuf[16] __attribute__((aligned(64)));
+    int32_t ibuf[16] YOLO_ALIGNED(64);
     memset(ibuf, 0, sizeof(ibuf));
     int k = 0;
 
@@ -443,22 +477,26 @@ static void gemm_int8_row_block_vnni256(float* c_row, const int8_t* a_row, const
         gemm_int8_row_finish_tail(c_row, ibuf, a_row, B, k, K, N, j0, 8, scale);
     }
 }
+#endif /* !defined(_MSC_VER) */
 
 static void gemm_int8_row_block(float* c_row, const int8_t* a_row, const int8_t* B, int K, int N, int j0, int jb,
                                 float scale) {
+#if !defined(_MSC_VER)
     const int vnni = gemm_int8_vnni_level();
     if (vnni == 2) {
         gemm_int8_row_block_vnni512(c_row, a_row, B, K, N, j0, jb, scale);
     } else if (vnni == 1) {
         gemm_int8_row_block_vnni256(c_row, a_row, B, K, N, j0, jb, scale);
-    } else {
+    } else
+#endif
+    {
         gemm_int8_row_block_avx2(c_row, a_row, B, K, N, j0, jb, scale);
     }
 }
 
-#endif /* __x86_64__ && __AVX2__ */
+#endif /* YOLO_ARCH_X64 && __AVX2__ */
 
-#if defined(__aarch64__)
+#if YOLO_ARCH_ARM64
 static void gemm_int8_row_block_neon(float* c_row, const int8_t* a_row, const int8_t* B, int K, int N, int j0,
                                      int jb, float scale) {
     int32x4_t acc0 = vdupq_n_s32(0);
@@ -501,7 +539,7 @@ status_t tensor_gemm_int8(float* restrict C, const int8_t* restrict A, const int
         float* c_row = C + i * N;
         int j = 0;
 
-#if defined(__x86_64__) && defined(__AVX2__)
+#if YOLO_ARCH_X64 && defined(__AVX2__)
         for (; j <= N - 16; j += 16) {
             gemm_int8_row_block(c_row, a_row, B, K, N, j, 16, scale);
         }
@@ -509,7 +547,7 @@ status_t tensor_gemm_int8(float* restrict C, const int8_t* restrict A, const int
             gemm_int8_row_block(c_row, a_row, B, K, N, j, 8, scale);
             j += 8;
         }
-#elif defined(__aarch64__)
+#elif YOLO_ARCH_ARM64
         for (; j <= N - 16; j += 16) {
             gemm_int8_row_block_neon(c_row, a_row, B, K, N, j, 16, scale);
         }
@@ -544,7 +582,7 @@ status_t tensor_gemm_weight_int8(float* restrict C, const int8_t* restrict W, co
 }
 
 const char* tensor_gemm_int8_backend(void) {
-#if defined(__x86_64__) && defined(__AVX2__)
+#if YOLO_ARCH_X64 && defined(__AVX2__)
     switch (gemm_int8_vnni_level()) {
         case 2:
             return "avx512-vnni";
@@ -553,7 +591,7 @@ const char* tensor_gemm_int8_backend(void) {
         default:
             return "avx2";
     }
-#elif defined(__aarch64__)
+#elif YOLO_ARCH_ARM64
     return "neon";
 #else
     return "scalar";

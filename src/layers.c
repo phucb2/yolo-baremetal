@@ -1,9 +1,4 @@
-#if defined(__AVX2__) || defined(__SSE2__)
-#include <immintrin.h>
-#endif
-#if defined(__aarch64__)
-#include <arm_neon.h>
-#endif
+#include "platform.h"
 #include <math.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -20,7 +15,7 @@ static void conv_bias_add_plane(float* plane, int len, float bias) {
         __m256 v = _mm256_loadu_ps(plane + i);
         _mm256_storeu_ps(plane + i, _mm256_add_ps(v, bv));
     }
-#elif defined(__aarch64__)
+#elif YOLO_ARCH_ARM64
     float32x4_t bv = vdupq_n_f32(bias);
     for (; i <= len - 4; i += 4) {
         float32x4_t v = vld1q_f32(plane + i);
@@ -362,12 +357,12 @@ static inline float dwconv3x3_pixel_sum(const float* in_plane, int h, int wi, co
 }
 
 /* Interior pixels only: 3×3 window fully inside — scalar fallback (non-SIMD targets). */
-__attribute__((unused)) static inline float dwconv3x3_center9(const float* p_tl, int wi, const float* w9, float b) {
+YOLO_UNUSED static inline float dwconv3x3_center9(const float* p_tl, int wi, const float* w9, float b) {
     return b + w9[0] * p_tl[0] + w9[1] * p_tl[1] + w9[2] * p_tl[2] + w9[3] * p_tl[wi] + w9[4] * p_tl[wi + 1] +
            w9[5] * p_tl[wi + 2] + w9[6] * p_tl[2 * wi] + w9[7] * p_tl[2 * wi + 1] + w9[8] * p_tl[2 * wi + 2];
 }
 
-#if defined(__aarch64__)
+#if YOLO_ARCH_ARM64
 static inline float dwconv3x3_center9_neon(const float* p_tl, int wi, float32x4_t wv0, float32x4_t wv1,
                                            float32x4_t wv2, float b) {
     float32x4_t p0 = vsetq_lane_f32(0.f, vld1q_f32(p_tl), 3);
@@ -427,7 +422,7 @@ static void dwconv3x3_same_plane_direct(const float* in_plane, int h, int wi, co
     }
 
     /* Middle rows — pack 3×3 weights once per plane (SIMD; avoids OOB load past w9[8]). */
-#if defined(__aarch64__)
+#if YOLO_ARCH_ARM64
     float32x4_t wv_neon0, wv_neon1, wv_neon2;
     {
         float wr[12];
@@ -469,7 +464,7 @@ static void dwconv3x3_same_plane_direct(const float* in_plane, int h, int wi, co
         if (fuse_silu) {
             for (int ow = 1; ow <= wi - 2; ow++) {
                 const float* p = in_plane + (oh - 1) * wi + (ow - 1);
-#if defined(__aarch64__)
+#if YOLO_ARCH_ARM64
                 float s = dwconv3x3_center9_neon(p, wi, wv_neon0, wv_neon1, wv_neon2, b);
 #elif defined(__SSE2__)
                 float s = dwconv3x3_center9_sse(p, wi, wv_sse0, wv_sse1, wv_sse2, b);
@@ -481,7 +476,7 @@ static void dwconv3x3_same_plane_direct(const float* in_plane, int h, int wi, co
         } else {
             for (int ow = 1; ow <= wi - 2; ow++) {
                 const float* p = in_plane + (oh - 1) * wi + (ow - 1);
-#if defined(__aarch64__)
+#if YOLO_ARCH_ARM64
                 out_row[ow] = dwconv3x3_center9_neon(p, wi, wv_neon0, wv_neon1, wv_neon2, b);
 #elif defined(__SSE2__)
                 out_row[ow] = dwconv3x3_center9_sse(p, wi, wv_sse0, wv_sse1, wv_sse2, b);

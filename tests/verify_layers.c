@@ -14,7 +14,7 @@
 #include "tensor.h"
 #include "utils.h"
 
-#define DEBUG_LOG_PATH "/Users/phucbb/Personal/random-project/.cursor/debug-5d8ee2.log"
+#define DEBUG_LOG_PATH "debug-verify.log"
 #define MAP_MAX 64
 
 typedef struct {
@@ -26,9 +26,7 @@ static void agent_log(const char* hypothesis_id, const char* location, const cha
                       const char* data_json) {
     FILE* f = fopen(DEBUG_LOG_PATH, "a");
     if (!f) return;
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    long long ms = (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    const long long ms = util_debug_timestamp_ms();
     fprintf(f,
             "{\"sessionId\":\"5d8ee2\",\"hypothesisId\":\"%s\",\"location\":\"%s\",\"message\":\"%s\",\"data\":%s,"
             "\"timestamp\":%lld}\n",

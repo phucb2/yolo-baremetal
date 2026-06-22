@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "gemm_backend.h"
 #include "tensor.h"
 #include "utils.h"
 
@@ -90,20 +91,15 @@ static void run_int8_case(const char* label, int M, int N, int K, int repeats) {
 }
 
 int main(void) {
-#ifdef USE_OPENBLAS
-    const char* backend = "OpenBLAS (cblas_sgemm)";
-#else
-    const char* backend = "scalar/AVX (hand-rolled)";
-#endif
-    printf("tensor_gemm micro-benchmark - %s\n", backend);
-    printf("  (set OPENBLAS_NUM_THREADS=1 for stable OpenBLAS timings)\n\n");
+    printf("tensor_gemm micro-benchmark - backend: %s\n", gemm_backend_name());
+    printf("  (set OPENBLAS_NUM_THREADS=1 or OMP_NUM_THREADS=1 for stable timings)\n\n");
 
     run_case("tiny (unit-test-like)", 5, 7, 4, 50000);
     run_case("medium", 128, 320, 128, 500);
     /* Conv-like 1x1: out_c x (H*W) @ in_c — large spatial N */
     run_case("large-N (conv-like)", 256, 4096, 256, 20);
 
-    printf("\ntensor_gemm_weight_int8 - backend: %s\n\n", tensor_gemm_int8_backend());
+    printf("\ntensor_gemm_weight_int8 - INT8 backend: %s\n\n", gemm_backend_int8_name());
     run_int8_case("int8 medium", 128, 320, 128, 500);
     run_int8_case("int8 large-N (conv-like)", 256, 4096, 256, 20);
 

@@ -1,3 +1,13 @@
 {
-  "dependencies": ["onednn"]
+  "dependencies": [
+    "onednn"
+  ],
+  "features": {
+    "cudnn": {
+      "description": "Enable cuDNN dependency for playground conv2d experiments.",
+      "dependencies": [
+        "cudnn"
+      ]
+    }
+  }
 }

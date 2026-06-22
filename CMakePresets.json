@@ -27,6 +27,16 @@
       }
     },
     {
+      "name": "win-cudnn",
+      "displayName": "Windows Release + cuDNN",
+      "inherits": "win",
+      "cacheVariables": {
+        "USE_CUDNN": "ON",
+        "VCPKG_MANIFEST_FEATURES": "cudnn",
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+      }
+    },
+    {
       "name": "mac",
       "displayName": "macOS Release",
       "generator": "Unix Makefiles",
@@ -46,8 +56,7 @@
     {
       "name": "win-onednn",
       "configurePreset": "win-onednn",
-      "configuration": "Release",
-      "targets": ["bench_gemm_compare", "playground"]
+      "configuration": "Release"
     },
     {
       "name": "mac",

@@ -6,7 +6,8 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 option(USE_INT8 "Enable INT8 inference" ON)
 option(USE_OPENBLAS "Link OpenBLAS for FP32 GEMM" OFF)
-option(USE_ONEDNN "Build bench_gemm_compare (oneDNN vs tensor_gemm)" OFF)
+option(USE_ONEDNN "Route FP32/INT8 conv GEMM through oneDNN (yolo_core)" OFF)
+option(USE_CUDNN "Enable cuDNN conv2d path in playground" OFF)
 option(GEMM_PREFER_AVX512_VNNI "Prefer AVX512-VNNI over AVX-VNNI" OFF)
 
 if(APPLE)
@@ -46,8 +47,14 @@ endif()
 
 include_directories(${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/third_party)
 
+if(USE_OPENBLAS AND USE_ONEDNN)
+    message(WARNING "USE_OPENBLAS and USE_ONEDNN are both ON; FP32 GEMM uses oneDNN (OpenBLAS only affects tiny-shape fallback).")
+endif()
+
 set(YOLO_CORE_SOURCES
     src/tensor.c
+    src/gemm_backend.c
+    src/gemm_native.c
     src/utils.c
     src/layers.c
     src/detection.c
@@ -57,6 +64,18 @@ set(YOLO_CORE_SOURCES
 )
 
 add_library(yolo_core STATIC ${YOLO_CORE_SOURCES})
+
+if(USE_ONEDNN)
+    find_package(dnnl CONFIG REQUIRED)
+    target_sources(yolo_core PRIVATE src/gemm_onednn.c)
+    target_compile_definitions(yolo_core PUBLIC USE_ONEDNN=1)
+    target_link_libraries(yolo_core PUBLIC DNNL::dnnl)
+endif()
+
+if(USE_CUDNN)
+    find_package(CUDAToolkit REQUIRED)
+    find_package(CUDNN REQUIRED)
+endif()
 
 if(USE_OPENBLAS)
     if(DEFINED OPENBLAS_ROOT)
@@ -120,14 +139,17 @@ target_link_libraries(bench_gemm PRIVATE yolo_core ${YOLO_BLAS_LIBS})
 yolo_link_math(bench_gemm)
 
 if(USE_ONEDNN)
-    find_package(dnnl CONFIG REQUIRED)
     add_executable(bench_gemm_compare tests/bench_gemm_compare.c)
-    target_link_libraries(bench_gemm_compare PRIVATE yolo_core DNNL::dnnl ${YOLO_BLAS_LIBS})
+    target_link_libraries(bench_gemm_compare PRIVATE yolo_core ${YOLO_BLAS_LIBS})
     yolo_link_math(bench_gemm_compare)
+endif()
 
-    add_executable(playground src/playground.c)
-    target_link_libraries(playground PRIVATE yolo_core ${YOLO_BLAS_LIBS})
-    yolo_link_math(playground)
+add_executable(playground src/playground.c)
+target_link_libraries(playground PRIVATE yolo_core ${YOLO_BLAS_LIBS})
+yolo_link_math(playground)
+if(USE_CUDNN)
+    target_compile_definitions(playground PRIVATE USE_CUDNN=1)
+    target_link_libraries(playground PRIVATE CUDA::cudart CuDNN::CuDNN)
 endif()
 
 add_executable(bench_coco8 tests/bench_coco8.c)

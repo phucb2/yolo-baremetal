@@ -273,7 +273,7 @@ float model_act_scale_for_weight(model_t* model, const char* weight_name) {
     return t->data[0];
 }
 
-
+// TODO: Efficient lookup for model_get_weight
 tensor_t* model_get_weight(model_t* model, const char* name) {
     for (int i = 0; i < model->num_weights; i++) {
         if (strcmp(model->weights[i].name, name) == 0) return &model->weights[i].tensor;

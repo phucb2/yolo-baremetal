@@ -42,14 +42,24 @@ cmake --build --preset mac
 | `USE_INT8` | ON | INT8 inference (`-DUSE_INT8=1`) |
 | `USE_CAMERA` | ON on macOS, OFF on Windows | Live camera via AVFoundation |
 | `USE_OPENBLAS` | OFF | Link OpenBLAS for FP32 GEMM (`-DOPENBLAS_ROOT=...`) |
-| `USE_ONEDNN` | OFF | Build `bench_gemm_compare` (oneDNN vs `tensor_gemm`; requires vcpkg) |
+| `USE_ONEDNN` | OFF | Route conv GEMM through oneDNN in `yolo_core` (~2× FP32 inference; requires vcpkg) |
 | `GEMM_PREFER_AVX512_VNNI` | OFF | Prefer AVX512-VNNI over AVX-VNNI (GCC/Clang only) |
 
 On Windows, INT8 GEMM uses AVX2 (VNNI kernels are GCC/Clang-only for now).
 
-### GEMM benchmark vs oneDNN (optional)
+### GEMM backend (native vs oneDNN)
 
-Compare `tensor_gemm` / `tensor_gemm_weight_int8` against oneDNN matmul on the same shapes as `bench_gemm`:
+Default builds use hand-rolled SIMD (or OpenBLAS when `USE_OPENBLAS=ON`). With **`USE_ONEDNN=ON`**, FP32 and INT8 conv GEMM in `yolo_core` go through oneDNN; tiny shapes (`M×N×K < 4096`) still use the native path. `USE_OPENBLAS` and `USE_ONEDNN` should not both be enabled for FP32 — oneDNN wins on conv-sized GEMM.
+
+Rebuild after toggling:
+
+```powershell
+cmake --preset win-onednn
+cmake --build --preset win-onednn
+.\build\Release\yolo26_bench.exe --image path\to\img.jpg --no-layer-profile
+```
+
+Side-by-side native vs oneDNN micro-benchmark (`bench_gemm_compare`) and active-backend bench (`bench_gemm` prints `gemm_backend_name()`):
 
 ```powershell
 vcpkg install onednn:x64-windows

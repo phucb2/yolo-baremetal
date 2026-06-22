@@ -89,7 +89,7 @@ def run_predict(
         source=bgr_640,
         imgsz=imgsz,
         conf=conf,
-        verbose=False,
+        verbose=True,
         device="cpu",
         half=False,
     )

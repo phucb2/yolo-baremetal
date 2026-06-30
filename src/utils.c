@@ -26,7 +26,7 @@ static void init_timer_freq(void) {
 }
 #endif
 
-void timer_start(timer_t* timer) {
+void timer_start(yolo_timer_t* timer) {
 #ifdef __APPLE__
     init_timebase();
     timer->start = mach_absolute_time();
@@ -40,7 +40,7 @@ void timer_start(timer_t* timer) {
 #endif
 }
 
-void timer_stop(timer_t* timer) {
+void timer_stop(yolo_timer_t* timer) {
 #ifdef __APPLE__
     timer->end = mach_absolute_time();
 #elif defined(_WIN32)
@@ -52,7 +52,7 @@ void timer_stop(timer_t* timer) {
 #endif
 }
 
-double timer_elapsed_ms(const timer_t* timer) {
+double timer_elapsed_ms(const yolo_timer_t* timer) {
 #ifdef __APPLE__
     uint64_t elapsed = timer->end - timer->start;
     double nanoseconds = (double)elapsed * timebase_info.numer / timebase_info.denom;

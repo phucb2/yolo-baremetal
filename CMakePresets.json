@@ -35,6 +35,16 @@
         "CMAKE_BUILD_TYPE": "Release",
         "USE_CAMERA": "ON"
       }
+    },
+    {
+      "name": "linux",
+      "displayName": "Linux Release",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "USE_CAMERA": "OFF"
+      }
     }
   ],
   "buildPresets": [
@@ -52,6 +62,10 @@
     {
       "name": "mac",
       "configurePreset": "mac"
+    },
+    {
+      "name": "linux",
+      "configurePreset": "linux"
     }
   ]
 }

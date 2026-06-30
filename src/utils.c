@@ -36,7 +36,9 @@ void timer_start(yolo_timer_t* timer) {
     QueryPerformanceCounter(&t);
     timer->start = (uint64_t)t.QuadPart;
 #else
-    (void)timer;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    timer->start = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 #endif
 }
 
@@ -48,7 +50,9 @@ void timer_stop(yolo_timer_t* timer) {
     QueryPerformanceCounter(&t);
     timer->end = (uint64_t)t.QuadPart;
 #else
-    (void)timer;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    timer->end = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 #endif
 }
 
@@ -62,8 +66,8 @@ double timer_elapsed_ms(const yolo_timer_t* timer) {
     const double elapsed = (double)(timer->end - timer->start);
     return elapsed * 1000.0 / (double)timer_freq.QuadPart;
 #else
-    (void)timer;
-    return 0.0;
+    uint64_t elapsed_ns = timer->end - timer->start;
+    return (double)elapsed_ns / 1000000.0;
 #endif
 }
 

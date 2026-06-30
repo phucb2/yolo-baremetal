@@ -10,6 +10,7 @@ runs/*
 tests/fixtures/bench_640.png
 .cursor/*.log
 build/*
+debug-yolo.log
 
 datasets/*
 vcpkg_installed/*

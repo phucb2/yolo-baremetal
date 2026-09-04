@@ -26,7 +26,7 @@ static void init_timer_freq(void) {
 }
 #endif
 
-void timer_start(timer_t* timer) {
+void timer_start(yolo_timer_t* timer) {
 #ifdef __APPLE__
     init_timebase();
     timer->start = mach_absolute_time();
@@ -36,11 +36,13 @@ void timer_start(timer_t* timer) {
     QueryPerformanceCounter(&t);
     timer->start = (uint64_t)t.QuadPart;
 #else
-    (void)timer;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    timer->start = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 #endif
 }
 
-void timer_stop(timer_t* timer) {
+void timer_stop(yolo_timer_t* timer) {
 #ifdef __APPLE__
     timer->end = mach_absolute_time();
 #elif defined(_WIN32)
@@ -48,11 +50,13 @@ void timer_stop(timer_t* timer) {
     QueryPerformanceCounter(&t);
     timer->end = (uint64_t)t.QuadPart;
 #else
-    (void)timer;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    timer->end = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 #endif
 }
 
-double timer_elapsed_ms(const timer_t* timer) {
+double timer_elapsed_ms(const yolo_timer_t* timer) {
 #ifdef __APPLE__
     uint64_t elapsed = timer->end - timer->start;
     double nanoseconds = (double)elapsed * timebase_info.numer / timebase_info.denom;
@@ -62,8 +66,8 @@ double timer_elapsed_ms(const timer_t* timer) {
     const double elapsed = (double)(timer->end - timer->start);
     return elapsed * 1000.0 / (double)timer_freq.QuadPart;
 #else
-    (void)timer;
-    return 0.0;
+    uint64_t elapsed_ns = timer->end - timer->start;
+    return (double)elapsed_ns / 1000000.0;
 #endif
 }
 

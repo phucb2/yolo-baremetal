@@ -5,6 +5,7 @@
 ## Requirements
 
 - Weights at `weights/yolo26.bin` (export from `.pt` first)
+- **Linux:** GCC/Clang, CMake 3.20+; see [Linux Setup Guide](docs/LINUX_SETUP.md)
 - **macOS:** Clang + AVFoundation for live camera (Makefile or CMake with `USE_CAMERA=ON`)
 - **Windows:** Visual Studio 2022+ (MSVC), CMake 3.20+; image inference only (`USE_CAMERA=OFF` by default)
 
@@ -18,6 +19,14 @@ make verify       # runs tests/test_core + Python syntax check on tools/
 ## Build (CMake, macOS or Windows)
 
 Presets are in [CMakePresets.json](CMakePresets.json).
+
+**Linux (Clang, image mode):**
+
+```bash
+cmake --preset linux
+cmake --build --preset linux
+./build/yolo26_bench --image path/to/img.jpg out.bmp
+```
 
 **Windows (MSVC, image mode):**
 

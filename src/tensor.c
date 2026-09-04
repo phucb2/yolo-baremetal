@@ -276,8 +276,12 @@ static int yolo_cpuid_max_leaf(void) {
 #else
 #include <cpuid.h>
 static void yolo_cpuid_ex(int info[4], int leaf, int subleaf) {
-    __cpuid_count(leaf, subleaf, (unsigned int*)info, (unsigned int*)info + 1, (unsigned int*)info + 2,
-                  (unsigned int*)info + 3);
+    unsigned int a, b, c, d;
+    __cpuid_count(leaf, subleaf, a, b, c, d);
+    info[0] = (int)a;
+    info[1] = (int)b;
+    info[2] = (int)c;
+    info[3] = (int)d;
 }
 static int yolo_cpuid_max_leaf(void) {
     return (int)__get_cpuid_max(0, NULL);

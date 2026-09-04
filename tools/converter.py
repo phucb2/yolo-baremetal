@@ -189,7 +189,7 @@ def export_yolo26_to_bin(
             sidecars.append((f"__act_scale.{mod_name}", float(scale)))
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    file_version = 1 if quant_meta else 0
+    file_version = 2  # Always use v2 format (includes dtype field)
     total_tensors = len(items) + len(sidecars)
 
     int8_count = 0
